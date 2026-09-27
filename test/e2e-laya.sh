@@ -76,13 +76,20 @@ echo "tools/list in $(( ($(date +%s%N) - T0) / 1000000 ))ms"
 # Assert on content, not timing. An earlier version of this script passed while every
 # call was failing: the shim had died on a missing LAYA_PYTHON, the bridge returned
 # error payloads fast, and nothing here looked at the body.
-if ! echo "$TOOLS" | grep -q 'laya_predict'; then
-  echo "FAIL: tools/list did not return laya tools. Body was:"
+#
+# The names here are the *stripped* ones, because that is what the bridge hands
+# opencode: the `laya_` prefix is removed on the way out and put back on the way in, so
+# the wire name is `predict`. This script used to grep for `laya_predict` here and call
+# `laya_predict` below, which stopped being true when the stripping was added -- and the
+# call then failed as "Unknown tool: laya_laya_predict", the bridge having helpfully
+# prefixed an already-prefixed name.
+if ! echo "$TOOLS" | grep -q '"name":"predict"'; then
+  echo "FAIL: tools/list did not return the predict tool. Body was:"
   echo "$TOOLS" | head -c 600; echo
   echo "--- daemon log ---"; tail -20 "${HOME}/.local/state/onesystem/daemon.log"
   exit 1
 fi
-echo "OK: $(echo "$TOOLS" | grep -oP 'laya_\w+' | sort -u | tr '\n' ' ')"
+echo "OK: tools = $(echo "$TOOLS" | grep -oP '"name":"\K[^"]+' | sort -u | tr '\n' ' ')"
 
 sleep 2
 V2=$(vram); L2=$(owned_laya)
@@ -90,7 +97,7 @@ echo "VRAM $(mb "$V2")   onesystem-owned laya procs $L2"
 if [ "$L2" -eq 1 ]; then echo "OK: exactly one laya process"; else echo "FAIL: expected 1 owned laya proc, got $L2"; exit 1; fi
 
 T1=$(date +%s%N)
-PRED=$(post '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"laya_predict","arguments":{"state":{"situation":"Choosing between two refactor options for a parser."},"questions":{"q":{"type":"choice","instructions":"Which is better?","criteria":{"a":"Split into named helpers","b":"Keep inline with comments"}}}}}}' "$SID")
+PRED=$(post '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"predict","arguments":{"state":{"situation":"Choosing between two refactor options for a parser."},"questions":{"q":{"type":"choice","instructions":"Which is better?","criteria":{"a":"Split into named helpers","b":"Keep inline with comments"}}}}}}' "$SID")
 echo "predict in $(( ($(date +%s%N) - T1) / 1000000 ))ms"
 if ! echo "$PRED" | flat | grep -q '"choice"'; then
   echo "FAIL: predict returned no answer. Body was:"; echo "$PRED" | head -c 600; echo; exit 1
@@ -104,7 +111,7 @@ if echo "$PRED" | flat | grep -q '"device":\s*"cpu"'; then echo "FAIL: ran on cp
 echo
 echo "=== warm predict (expect tens of ms) ==="
 T2=$(date +%s%N)
-WARM=$(post '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"laya_predict","arguments":{"state":{"situation":"A team must choose one of two deployment strategies."},"questions":{"q":{"type":"choice","instructions":"Which strategy?","criteria":{"canary":"Ship behind a canary flag","bigbang":"Deploy to everyone at once"}}}}}}' "$SID")
+WARM=$(post '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"predict","arguments":{"state":{"situation":"A team must choose one of two deployment strategies."},"questions":{"q":{"type":"choice","instructions":"Which strategy?","criteria":{"canary":"Ship behind a canary flag","bigbang":"Deploy to everyone at once"}}}}}}' "$SID")
 echo "warm predict in $(( ($(date +%s%N) - T2) / 1000000 ))ms"
 echo "$WARM" | flat | grep -oP '"choice":\s*"[^"]*"' | head -1
 

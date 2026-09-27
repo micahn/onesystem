@@ -16,8 +16,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { validate, type Config } from "../src/config.ts"
-import { runDaemon } from "../src/daemon.ts"
-import { probe } from "../src/daemon.ts"
+import { runDaemon, probe } from "../src/daemon.ts"
+import type { HealthReport } from "../src/health.ts"
 
 const cleanups: (() => Promise<void>)[] = []
 const dirs: string[] = []
@@ -74,7 +74,7 @@ describe("lazy start", () => {
 
     const url = `http://127.0.0.1:${port}`
     const deadline = Date.now() + 10_000
-    let health: Record<string, unknown> | null = null
+    let health: HealthReport | null = null
     while (Date.now() < deadline && !health) {
       await Bun.sleep(50)
       health = await probe(url)
@@ -85,8 +85,7 @@ describe("lazy start", () => {
 
     // The heart of it: the daemon is up and healthy, and the child has not spawned.
     expect(await markerLines(marker)).toEqual([])
-    const snapshot = health as { backends: { name: string; state: string }[] }
-    expect(snapshot.backends[0]!.state).toBe("cold")
+    expect(health!.backends[0]!.state).toBe("cold")
   }, 30_000)
 
   test("the first MCP request spawns the backend, and a second reuses it", async () => {

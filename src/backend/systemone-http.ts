@@ -17,30 +17,43 @@
  * against a live service here, and inventing field names that silently do nothing is
  * worse than an honest pass-through. So this exposes one `systemone` tool that takes
  * the request body verbatim and returns the response verbatim. Once a real service is
- * running, replace `forward()` with a typed adapter and the tool surface gets proper
+ * running, replace `call()` with a typed adapter and the tool surface gets proper
  * schemas. The transport, lifecycle, and HTTP fronting stay exactly as they are.
  */
 
 import type { SystemOneBackend } from "../config.ts"
+import { describeError, startDeadline } from "../async.ts"
 import { logger } from "../log.ts"
-import { BackendError, type Backend, type BackendState, type ForwardContext } from "./types.ts"
-import { describe } from "./stdio-mcp.ts"
+import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
 const log = logger("systemone-http")
 
+export type FetchLike = (input: string, init: RequestInit) => Promise<Response>
+
 export class SystemOneBackendImpl implements Backend {
   readonly transport = "systemone-http" as const
-  lastActivityAt = Date.now()
-  inflight = 0
+  /**
+   * Nothing local to release, so the idle sweep must not count this backend. Stated here
+   * rather than inferred from the transport at four call sites: "is this ours to stop" is
+   * a fact about the adapter, not a pattern match the supervisor repeats.
+   */
+  readonly local = false
 
   /** A remote service is always "warm": there is nothing local to start or hold. */
   #state: BackendState = "warm"
   #reachable: boolean | null = null
+  #lastActivityAt = Date.now()
+  #inflight = 0
 
   constructor(
     readonly name: string,
     private readonly spec: SystemOneBackend,
+    private readonly deps: { fetch?: FetchLike; now?: () => number } = {},
   ) {}
+
+  #now(): number {
+    return (this.deps.now ?? Date.now)()
+  }
 
   get state(): BackendState {
     return this.#state
@@ -52,18 +65,25 @@ export class SystemOneBackendImpl implements Backend {
 
   /** No-op, and not merely because it is cheap: there is no process to own. */
   async start(): Promise<void> {
-    this.lastActivityAt = Date.now()
+    this.#lastActivityAt = this.#now()
   }
 
-  async stop(): Promise<void> {
+  async quiesce(): Promise<void> {
     // Nothing local to release. The supervisor still counts this backend as warm, so it
-    // is exempt from the idle sweep; see Supervisor#sweep.
+    // is exempt from the idle sweep; see BackendStatus#local.
   }
 
-  async forward(ctx: ForwardContext): Promise<unknown> {
-    this.inflight++
-    this.lastActivityAt = Date.now()
+  async call(ctx: CallContext): Promise<unknown> {
+    this.#inflight++
+    this.#lastActivityAt = this.#now()
     try {
+      // Answered here, not in the supervisor. The tool surface is this adapter's own
+      // business, and special-casing it one layer up meant the request path had a branch
+      // that only applied to one transport — a third transport would need a fourth edit
+      // in a module that has no reason to know any of them.
+      if (ctx.method === "tools/list") {
+        return systemoneToolList()
+      }
       if (ctx.method !== "tools/call") {
         throw new BackendError(this.name, `method not supported by the systemone adapter: ${ctx.method}`)
       }
@@ -74,16 +94,23 @@ export class SystemOneBackendImpl implements Backend {
       const body = (ctx.params as { arguments?: unknown }).arguments
 
       const url = `${this.spec.baseUrl}/v1/systemone`
-      const timeoutMs = (this.spec.startupTimeoutSecs ?? 30) * 1000
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      const timeoutMs = ctx.timeoutMs ?? (this.spec.startupTimeoutSecs ?? 30) * 1000
+      const doFetch = this.deps.fetch ?? ((input, init) => fetch(input, init))
+      const body_text = JSON.stringify(body ?? {})
+
+      // The deadline and the caller's signal both have to reach fetch, and they are two
+      // separate aborts. The old code took `ctx.signal ?? controller.signal`, which meant
+      // that supplying a caller signal silently discarded the timeout — a branch that
+      // read as a merge and behaved as a replacement.
+      const deadline = startDeadline(timeoutMs)
+      const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline.signal]) : deadline.signal
 
       try {
-        const res = await fetch(url, {
+        const res = await doFetch(url, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(body ?? {}),
-          signal: ctx.signal ?? controller.signal,
+          body: body_text,
+          signal,
         })
         const text = await res.text()
         if (!res.ok) {
@@ -93,27 +120,37 @@ export class SystemOneBackendImpl implements Backend {
         // MCP tool results are content blocks, so wrap the untouched body. The body
         // itself is passed through verbatim in both directions.
         return { content: [{ type: "text", text }] }
+      } catch (err) {
+        if (deadline.timedOut()) {
+          throw new BackendError(this.name, `POST ${url} exceeded ${timeoutMs}ms`, err)
+        }
+        if (ctx.signal?.aborted) {
+          throw new BackendError(this.name, `POST ${url} was cancelled`, err)
+        }
+        throw err
       } finally {
-        clearTimeout(timer)
+        deadline.dispose()
       }
     } catch (err) {
       this.#reachable = false
       if (err instanceof BackendError) throw err
-      throw new BackendError(this.name, `forward failed: ${describe(err)}`, err)
+      throw new BackendError(this.name, `forward failed: ${describeError(err)}`, err)
     } finally {
-      this.inflight--
-      this.lastActivityAt = Date.now()
+      this.#inflight--
+      this.#lastActivityAt = this.#now()
     }
   }
 
-  describe(): Record<string, unknown> {
+  describe(): BackendStatus & { baseUrl: string; reachable: boolean | null } {
     return {
       name: this.name,
       transport: this.transport,
       state: this.#state,
+      local: false,
+      inflight: this.#inflight,
+      idleMs: this.#now() - this.#lastActivityAt,
       baseUrl: this.spec.baseUrl,
       reachable: this.#reachable,
-      inflight: this.inflight,
     }
   }
 }

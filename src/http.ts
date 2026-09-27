@@ -25,6 +25,15 @@
  * 20-54s here, on top of the backend's own import. opencode's default `mcp.timeout.startup`
  * is 30s, so a cold remote server looks like a startup failure. The plugin raises that
  * timeout when it registers the server; this side just has to not give up first.
+ *
+ * ## What this module depends on
+ *
+ * `BackendRoutes`, which is four methods — not the supervisor. Everything else about a
+ * backend (how it starts, when it may be stopped, what transport it speaks) is behind
+ * that slice, so routing can be tested against a port that is not a supervisor. The
+ * previous signature took the concrete `Supervisor` class, which meant the one module
+ * that had a real seam never exposed it and every routing test needed a live child
+ * process.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
@@ -35,16 +44,33 @@ import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
   ListPromptsRequestSchema,
-  ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import type { Config } from "./config.ts"
+import { healthReport } from "./health.ts"
+import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
-import { Supervisor } from "./supervisor.ts"
+import { VERSION } from "./version.ts"
 
 const log = logger("http")
+
+/** Request bodies larger than this are refused rather than buffered. */
+const MAX_BODY_BYTES = 8 * 1024 * 1024
+
+/**
+ * The slice of the backend port this module needs.
+ *
+ * Declared as a `Pick` rather than its own interface so it cannot drift from the real
+ * one. Narrower than the full port on purpose: a test for routing should not have to
+ * implement the idle watch to satisfy a type it does not use.
+ */
+export type BackendRoutes = Pick<
+  import("./backend/types.ts").BackendPort,
+  "names" | "get" | "call" | "snapshot"
+>
 
 export interface RunningDaemon {
   server: Server
@@ -53,18 +79,25 @@ export interface RunningDaemon {
   close(): Promise<void>
 }
 
-export async function serve(config: Config, supervisor: Supervisor): Promise<RunningDaemon> {
+export async function serve(config: Config, backends: BackendRoutes): Promise<RunningDaemon> {
   /** MCP session id -> its transport. The transport owns the Server it is paired with. */
   const sessions = new Map<string, StreamableHTTPServerTransport>()
+  /**
+   * The signal of the request currently being handled, per transport.
+   *
+   * A WeakMap rather than one variable, because two sessions can be mid-call at once and
+   * a shared variable would hand one session's disconnect to the other session's model
+   * call. Keyed on the transport so the lifetime is exactly the session's.
+   */
+  const inFlight = new WeakMap<StreamableHTTPServerTransport, AbortSignal | undefined>()
 
-  const buildServer = (backendName: string): McpServer => {
+  const buildServer = (backendName: string, transport: StreamableHTTPServerTransport): McpServer => {
     const server = new McpServer(
-      { name: `onesystem:${backendName}`, version: "0.1.0" },
+      { name: `onesystem:${backendName}`, version: VERSION },
       { capabilities: { tools: {}, prompts: {}, resources: {} } },
     )
 
-    const backend = supervisor.get(backendName)
-    const prefix = backend.toolPrefix
+    const prefix = backends.get(backendName).toolPrefix
 
     // Every handler is a straight forward. The supervisor is what decides whether that
     // costs a model load, so nothing here needs to know about VRAM or cold starts.
@@ -77,7 +110,10 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
         params.name = prefix + params.name
       }
 
-      const result = (await supervisor.handle(backendName, method, params)) ?? {}
+      // The client's disconnect rides through, so a caller that gives up does not leave a
+      // model call running. It used to be dropped here: the interface declared a signal,
+      // the supervisor forwarded it, and this line called `call` with three arguments.
+      const result = (await backends.call(backendName, method, params, inFlight.get(transport))) ?? {}
 
       // And strip it again on the way out, so the catalog opencode caches reads
       // `predict`. Renaming only in one direction would break the other.
@@ -128,38 +164,41 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
         if (transport!.sessionId) sessions.delete(transport!.sessionId)
         log.debug("session closed", { backend: backendName })
       }
-      const server = buildServer(backendName)
+      const server = buildServer(backendName, transport)
       await server.connect(transport)
     }
 
-    await transport.handleRequest(req, res, body)
+    // Published for the duration of the request so the handlers above can pass the
+    // client's disconnect down to the backend, then forgotten either way.
+    const client = clientDisconnect(req, res)
+    inFlight.set(transport, client.signal)
+    try {
+      await transport.handleRequest(req, res, body)
+    } finally {
+      inFlight.delete(transport)
+      client.dispose()
+    }
   }
 
   const server = createServer((req, res) => {
     void route(req, res).catch((err) => {
-      log.error("unhandled", { error: String(err) })
+      log.error("unhandled", { error: describeError(err) })
       if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json" })
-        res.end(JSON.stringify({ error: "internal_error", message: String(err) }))
+        const status = httpStatus(err)
+        res.writeHead(status, { "content-type": "application/json" })
+        res.end(JSON.stringify({ error: status === 400 ? "bad_request" : "internal_error", message: describeError(err) }))
       }
     })
   })
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`)
-
-    // Loopback-only service, but a browser page on another origin should still not be
-    // able to drive it. Echoing the caller's Origin keeps simple CSRF off the endpoint.
-    res.setHeader("x-onesystem", "0.1.0")
+    res.setHeader("x-onesystem", VERSION)
 
     if (url.pathname === "/health" && req.method === "GET") {
-      const body = JSON.stringify({
-        status: "ok",
-        pid: process.pid,
-        uptimeMs: Math.round(process.uptime() * 1000),
-        idleShutdownSecs: config.idleShutdownSecs,
-        ...supervisor.snapshot(),
-      })
+      const body = JSON.stringify(
+        healthReport({ idleShutdownSecs: config.idleShutdownSecs, backends: backends.snapshot().backends }),
+      )
       res.writeHead(200, { "content-type": "application/json" })
       res.end(body)
       return
@@ -168,12 +207,12 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
     const match = url.pathname.match(/^\/mcp\/([A-Za-z0-9_-]+)$/)
     if (match) {
       const backendName = match[1]!
-      if (!supervisor.backends.has(backendName)) {
+      if (!backends.names().includes(backendName)) {
         res.writeHead(404, { "content-type": "application/json" })
         res.end(
           JSON.stringify({
             error: "unknown_backend",
-            message: `no backend named ${backendName}; configured: ${[...supervisor.backends.keys()].join(", ") || "none"}`,
+            message: `no backend named ${backendName}; configured: ${backends.names().join(", ") || "none"}`,
           }),
         )
         return
@@ -194,14 +233,13 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
       JSON.stringify({
         error: "not_found",
         message: "POST /mcp/:backend, or GET /health",
-        backends: [...supervisor.backends.keys()],
+        backends: backends.names(),
       }),
     )
   }
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject)
-    // Loopback only. Not configurable to a public bind without auth; see config.ts.
     server.listen(config.port, config.host, () => {
       server.off("error", reject)
       resolve()
@@ -210,8 +248,8 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
 
   const address = server.address()
   const port = typeof address === "object" && address ? address.port : config.port
-  const url = `http://${config.host}:${port}`
-  log.info("listening", { url, backends: [...supervisor.backends.keys()] })
+  const url = daemonUrl(config.host, port)
+  log.info("listening", { url, backends: backends.names() })
 
   return {
     server,
@@ -227,9 +265,59 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
   }
 }
 
+/** The one place a daemon's address is assembled. See `daemonUrl` in config.ts. */
+function daemonUrl(host: string, port: number): string {
+  return `http://${host}:${port}`
+}
+
+/**
+ * A signal that fires when the client goes away mid-request.
+ *
+ * Not `req.signal`, which is the obvious choice and is wrong here. A request's own signal
+ * aborts when the *request* is done — and a POST with a body is done the moment we have
+ * read it, which is before the handler runs. Wiring that through aborted every single
+ * tool call. What we want is the client hanging up before the response finished, which
+ * lives on the response: `close` with nothing written means the peer went away.
+ */
+function clientDisconnect(req: IncomingMessage, res: ServerResponse): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController()
+  const onClose = () => {
+    if (!res.writableEnded) controller.abort()
+  }
+  const onAborted = () => controller.abort()
+  res.on("close", onClose)
+  req.on("aborted", onAborted)
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      res.off("close", onClose)
+      req.off("aborted", onAborted)
+    },
+  }
+}
+
+/**
+ * A request error that already knows its status.
+ *
+ * `readJsonBody` used to attach `{status: 400}` and the one catch site ignored it and
+ * wrote 500 for everything, so every malformed body came back as `internal_error`.
+ */
+function httpStatus(err: unknown): number {
+  const status = (err as { status?: unknown } | null)?.status
+  return typeof status === "number" && status >= 400 && status <= 599 ? status : 500
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(chunk as Buffer)
+  let size = 0
+  for await (const chunk of req) {
+    const buf = chunk as Buffer
+    size += buf.byteLength
+    if (size > MAX_BODY_BYTES) {
+      throw Object.assign(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`), { status: 413 })
+    }
+    chunks.push(buf)
+  }
   const raw = Buffer.concat(chunks).toString("utf8")
   if (!raw.trim()) return undefined
   try {

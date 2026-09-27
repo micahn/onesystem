@@ -15,18 +15,32 @@
  *
  * The lock is released in a `finally` and the release is idempotent, so whichever exit
  * wins, the next daemon can take the lock.
+ *
+ * Note what this module does not know: how any backend works, and where a model comes
+ * from. It assembles a port, hands it to the HTTP front, and takes it apart again.
  */
 
 import type { Config } from "./config.ts"
 import { lockPath } from "./config.ts"
 import { logger } from "./log.ts"
+import { describeError } from "./async.ts"
 import { acquire, LockBusy, type Lease } from "./lock.ts"
 import { serve, type RunningDaemon } from "./http.ts"
-import { Supervisor } from "./supervisor.ts"
+import { Supervisor, type SupervisorDeps } from "./supervisor.ts"
+import type { BackendPort } from "./backend/types.ts"
+import type { HealthReport } from "./health.ts"
+import { probeHealth } from "./health.ts"
 
 const log = logger("daemon")
 
-export interface DaemonOptions {
+/**
+ * Exit code for "another daemon already holds the lock", so `onesystem start` can tell
+ * that apart from "we crashed" and report the holder rather than a bare EADDRINUSE.
+ * Duplicated as a literal in the CLI until now; it is a contract between two processes.
+ */
+export const LOCK_BUSY_EXIT = 3
+
+export interface DaemonOptions extends SupervisorDeps {
   /** Override the lock path. Tests use this to stay out of the real state dir. */
   lockFile?: string
   /**
@@ -38,6 +52,8 @@ export interface DaemonOptions {
    * daemon down with a signal would take its own runner down with it.
    */
   handleSignals?: boolean
+  /** Supply the port instead of building one. Tests use this to avoid real backends. */
+  backends?: BackendPort
 }
 
 export interface DaemonHandle {
@@ -51,22 +67,19 @@ export interface DaemonHandle {
 
 export async function runDaemon(config: Config, options: DaemonOptions = {}): Promise<DaemonHandle> {
   const lockFile = options.lockFile ?? lockPath()
+  const backends = options.backends ?? new Supervisor(config, options)
 
   let lease: Lease
   try {
-    lease = await acquire(lockFile, { port: config.port, backends: Object.keys(config.backends) })
+    lease = await acquire(lockFile, { port: config.port, backends: backends.names() })
   } catch (err) {
     if (err instanceof LockBusy) {
-      // Exit code 3 so `onesystem start` can tell "someone else has it" apart from
-      // "we crashed", and report the holder instead of a bare EADDRINUSE.
       log.error("another daemon is already running", { holder: err.holder })
-      process.exitCode = 3
+      process.exitCode = LOCK_BUSY_EXIT
       throw new LockBusy(err.holder)
     }
     throw err
   }
-
-  const supervisor = new Supervisor(config)
 
   let daemon: RunningDaemon | null = null
   let shuttingDown = false
@@ -82,17 +95,21 @@ export async function runDaemon(config: Config, options: DaemonOptions = {}): Pr
     // Order: stop answering, stop the models, then drop the lock. Unloading the models
     // first is what actually frees the VRAM, and doing it before releasing the lock
     // means a successor daemon cannot start a second copy into a still-full GPU.
-    await daemon?.close().catch(() => {})
-    await supervisor.stopAll().catch(() => {})
+    //
+    // The failures are logged rather than swallowed. A backend that will not quiesce is
+    // the difference between a clean exit and a successor finding the GPU still full, and
+    // the old `.catch(() => {})` made that invisible.
+    await daemon?.close().catch((err) => log.error("http close failed", { error: describeError(err) }))
+    await backends.quiesce().catch((err) => log.error("backend quiesce failed", { error: describeError(err) }))
     await lease.release()
     log.info("stopped", { reason })
     resolveFinished()
   }
 
   try {
-    daemon = await serve(config, supervisor)
+    daemon = await serve(config, backends)
   } catch (err) {
-    log.error("failed to bind", { error: String(err) })
+    log.error("failed to bind", { error: describeError(err) })
     await lease.release()
     resolveFinished()
     throw err
@@ -100,7 +117,7 @@ export async function runDaemon(config: Config, options: DaemonOptions = {}): Pr
 
   // The idle window starts counting from daemon start, but only fires once a model has
   // actually been loaded and then gone quiet. See Supervisor#sweep.
-  supervisor.startIdleWatch(() => {
+  backends.watchIdle(() => {
     void shutdown("idle").then(() => {
       if (options.handleSignals !== false) process.exit(0)
     })
@@ -123,16 +140,6 @@ export async function runDaemon(config: Config, options: DaemonOptions = {}): Pr
 }
 
 /** Probe a daemon that may or may not be running. Never starts anything. */
-export async function probe(url: string, timeoutMs = 1500): Promise<Record<string, unknown> | null> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(`${url}/health`, { signal: controller.signal })
-    if (!res.ok) return null
-    return (await res.json()) as Record<string, unknown>
-  } catch {
-    return null
-  } finally {
-    clearTimeout(timer)
-  }
+export async function probe(url: string, timeoutMs?: number): Promise<HealthReport | null> {
+  return probeHealth(url, timeoutMs)
 }

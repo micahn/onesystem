@@ -183,6 +183,7 @@ a process backend.
 | Plugin loads | `onesystem start`, then register remote MCP servers. No model. |
 | First `tools/call` | Backend spawns. Costs 10-54s and ~3 GB VRAM. |
 | Idle for `idleShutdownSecs` | Backend stops; when nothing is warm the daemon exits. |
+| Next `tools/call` after that | Plugin notices nothing is listening and restarts the daemon first. |
 | Session closes | Registration dropped. **Daemon left running** — see below. |
 | Catalog changes | opencode caches tool names per session, so a rename needs a session restart. |
 | `onesystem stop` | Everything stops now. |
@@ -190,6 +191,16 @@ a process backend.
 A session closing does not stop the daemon. Sessions close independently, so one closing
 must not pull the model out from under the others. The idle window is what ends it, and
 `onesystem stop` is there for when you want it gone immediately.
+
+A session routinely outlives the idle window, and opencode holds no handle on the daemon
+process — the tools stay in the session catalog, so the agent keeps calling them against a
+port nothing is listening on. So the plugin hooks `tool.execute.before`: a call to one of
+its own servers probes `/health` first, and starts the daemon if nothing answers. The call
+pays about a second of startup rather than failing, and the session's MCP client is
+reloaded so it drops the session id of the daemon that exited. Deliberately not a poll: a
+timer would either hold the daemon open forever or sit on an interval long enough to be
+the same bug. The GPU is still released the moment the window closes; only the process
+comes back, and it comes back cold.
 
 ## Timeouts
 

@@ -12,6 +12,23 @@
  * transformers, measured here at 25-30s, and it does that before it binds stdio. So the
  * child is silent for ~30s after spawn. `startupTimeoutSecs` defaults to 180 because of
  * that silence, not because the work is slow.
+ *
+ * ## The stop/start race
+ *
+ * A cold load takes 20-54s, which is a long time for a shutdown to overlap with. The
+ * original code read `this.#client` in `stop()`, but that field is only assigned once
+ * `connect()` has resolved — so a stop arriving during a load closed nothing, returned
+ * immediately, and let the caller release the lock and exit. Thirty seconds later the
+ * handshake finished, set the state to `warm`, and left a live process holding VRAM that
+ * nothing was accounting for. A successor daemon could then start a second copy into a
+ * GPU the first one was still sitting in, which is the exact failure this project exists
+ * to prevent.
+ *
+ * The fix is a generation counter rather than a flag, because a flag would have to be
+ * reset for the idle sweep's reaping (which quiesces a backend and expects a later call
+ * to start it again) and a reset flag is a race waiting to happen. A quiesce bumps the
+ * generation; a start records the generation it began under and refuses to publish a
+ * client that the generation has moved past.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -28,8 +45,9 @@ import {
   ReadResourceResultSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import type { StdioBackend } from "../config.ts"
+import { describeError } from "../async.ts"
 import { logger } from "../log.ts"
-import { BackendError, type Backend, type BackendState, type ForwardContext } from "./types.ts"
+import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
 const log = logger("stdio-mcp")
 
@@ -60,17 +78,29 @@ type ForwardedMethod = keyof typeof RESULT_SCHEMAS
 
 export class StdioMcpBackend implements Backend {
   readonly transport = "stdio-mcp" as const
-  lastActivityAt = Date.now()
-  inflight = 0
+  /** Stopping this releases a process onesystem owns, so the idle sweep counts it. */
+  readonly local = true
 
   #state: BackendState = "cold"
   #client: Client | null = null
   #starting: Promise<void> | null = null
+  #lastActivityAt = Date.now()
+  #inflight = 0
+  /**
+   * Bumped by every quiesce. A start that began under an older generation is stale, and
+   * must tear its own child down rather than publish it.
+   */
+  #generation = 0
 
   constructor(
     readonly name: string,
     private readonly spec: StdioBackend,
+    private readonly deps: { now?: () => number } = {},
   ) {}
+
+  #now(): number {
+    return (this.deps.now ?? Date.now)()
+  }
 
   get state(): BackendState {
     return this.#state
@@ -80,21 +110,26 @@ export class StdioMcpBackend implements Backend {
     return this.spec.toolPrefix
   }
 
+  /**
+   * Start the child and complete the handshake. Lazy, expensive, and idempotent:
+   * concurrent callers share one start, and an already-warm backend is a no-op.
+   */
   async start(): Promise<void> {
     if (this.#state === "warm") return
     if (this.#starting) return this.#starting
 
     this.#state = "starting"
-    this.lastActivityAt = Date.now()
-    this.#starting = this.#doStart().finally(() => {
+    this.#lastActivityAt = this.#now()
+    const generation = this.#generation
+    this.#starting = this.#doStart(generation).finally(() => {
       this.#starting = null
     })
     return this.#starting
   }
 
-  async #doStart(): Promise<void> {
+  async #doStart(generation: number): Promise<void> {
     const timeoutMs = (this.spec.startupTimeoutSecs ?? 180) * 1000
-    const started = Date.now()
+    const started = this.#now()
     log.info("spawning", { command: this.spec.command[0], timeoutMs })
 
     const transport = new StdioClientTransport({
@@ -110,40 +145,66 @@ export class StdioMcpBackend implements Backend {
     try {
       // Bound the whole spawn-plus-handshake. Without this the SDK's default is long
       // enough that a wedged child looks like a hung request rather than a failed start.
-      await withTimeout(client.connect(transport), timeoutMs, `connect ${this.name}`)
+      await withStartupTimeout(client.connect(transport), timeoutMs, `connect ${this.name}`)
     } catch (err) {
       // Tear the half-open child down; leaving it would strand VRAM and the port.
       await client.close().catch(() => {})
       this.#state = "failed"
       throw new BackendError(
         this.name,
-        `failed to start within ${timeoutMs / 1000}s: ${describe(err)}`,
+        `failed to start within ${timeoutMs / 1000}s: ${describeError(err)}`,
         err,
       )
     }
 
+    // A quiesce landed while the handshake was in flight. It has already returned, and
+    // the caller believes everything is stopped, so publishing the client now would be a
+    // lie with a live process attached. Tear it down instead.
+    if (generation !== this.#generation) {
+      this.#state = "cold"
+      await client.close().catch(() => {})
+      log.info("discarded a start that was quiesced mid-handshake", { name: this.name })
+      return
+    }
+
     this.#client = client
     this.#state = "warm"
-    this.lastActivityAt = Date.now()
-    log.info("warm", { startupMs: Date.now() - started })
+    this.#lastActivityAt = this.#now()
+    log.info("warm", { startupMs: this.#now() - started })
   }
 
-  async stop(): Promise<void> {
-    if (this.#state === "cold") return
+  /**
+   * Release the child, and wait until it is actually released.
+   *
+   * Waiting on an in-flight start is the point. A caller that quits after this returns
+   * will not be surprised by a process appearing later.
+   */
+  async quiesce(): Promise<void> {
+    this.#generation++
+    const wasCold = this.#state === "cold"
     this.#state = "stopping"
+
+    // A cold load may be in flight, and the child it is spawning is the resource we are
+    // here to release. Let it settle first; #doStart will notice the generation moved and
+    // close its own child. Without this, tearing down a half-open handshake and letting
+    // the start finish behind us is how a stopped daemon ends up still holding VRAM.
+    const starting = this.#starting
+    if (starting) await starting.catch(() => {})
+
     const client = this.#client
     this.#client = null
+    this.#state = "cold"
+    if (wasCold && !client) return
     try {
       await client?.close()
+      log.info("stopped")
     } catch (err) {
       // A child that ignores SIGTERM should not block shutdown.
-      log.warn("close failed, continuing", { error: describe(err) })
+      log.warn("close failed, continuing", { error: describeError(err) })
     }
-    this.#state = "cold"
-    log.info("stopped")
   }
 
-  async forward(ctx: ForwardContext): Promise<unknown> {
+  async call(ctx: CallContext): Promise<unknown> {
     const method = ctx.method as ForwardedMethod
     const schema = RESULT_SCHEMAS[method]
     if (!schema) {
@@ -157,33 +218,55 @@ export class StdioMcpBackend implements Backend {
     const client = this.#client
     if (!client) throw new BackendError(this.name, "backend is not connected")
 
-    this.inflight++
-    this.lastActivityAt = Date.now()
+    this.#inflight++
+    this.#lastActivityAt = this.#now()
     try {
-      return await client.request({ method, params: ctx.params ?? {} } as never, schema as never)
+      return await client.request(
+        { method, params: ctx.params ?? {} } as never,
+        schema as never,
+        // Both halves of the deadline. The signal is what actually cancels; the timeout
+        // is what stops the SDK applying its own 60s default, which is shorter than the
+        // 120s onesystem is configured for.
+        { signal: ctx.signal, timeout: ctx.timeoutMs },
+      )
     } catch (err) {
-      throw new BackendError(this.name, `${ctx.method} failed: ${describe(err)}`, err)
+      if (ctx.signal?.aborted) {
+        throw new BackendError(this.name, `${ctx.method} was cancelled: ${describeError(err)}`, err)
+      }
+      throw new BackendError(this.name, `${ctx.method} failed: ${describeError(err)}`, err)
     } finally {
-      this.inflight--
-      this.lastActivityAt = Date.now()
+      // The `finally` is what makes an aborted call releasable. Without it, a cancelled
+      // call leaves `inflight` above zero and the idle sweep skips this backend forever.
+      this.#inflight--
+      this.#lastActivityAt = this.#now()
     }
   }
 
-  describe(): Record<string, unknown> {
+  describe(): BackendStatus & { command: string; generation: number } {
     return {
       name: this.name,
       transport: this.transport,
       state: this.#state,
+      local: true,
+      inflight: this.#inflight,
+      idleMs: this.#now() - this.#lastActivityAt,
       command: this.spec.command.join(" "),
-      inflight: this.inflight,
-      idleMs: Date.now() - this.lastActivityAt,
+      generation: this.#generation,
     }
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+/**
+ * Bound the handshake, and say so plainly.
+ *
+ * Local, because a start has no caller-supplied signal to ride: the abort would have to
+ * be threaded through `start()`, and the only thing that wants to cancel a start is a
+ * quiesce — which is already handled by the generation counter, not by a timer.
+ */
+function withStartupTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms)
+    timer.unref?.()
     promise.then(
       (v) => {
         clearTimeout(timer)
@@ -195,9 +278,4 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
       },
     )
   })
-}
-
-export function describe(err: unknown): string {
-  if (err instanceof Error) return err.message
-  return String(err)
 }

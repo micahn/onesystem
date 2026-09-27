@@ -20,12 +20,21 @@
  *
  * Layer 1 alone would be defeated by a stale file after a hard kill (SIGKILL leaves no
  * cleanup handler), so `acquire` reads the recorded pid and steals the lock when that
- * pid is provably gone. Stealing is only safe because the holder's port is also
- * checked: see `Holder`.
+ * pid is provably gone.
+ *
+ * Stealing is only safe because the holder's port is also checked, and that check used
+ * to be documented here and implemented nowhere. The record has always carried the
+ * daemon's port and no reader ever parsed it, so the safety argument for the steal path
+ * rested on a fact nothing in this file looked at. It does now: before reclaiming a lock
+ * whose pid is gone, `acquire` connects to the recorded port. A dead pid with a live
+ * listener means the daemon is serving under a pid we cannot see, and reclaiming on the
+ * strength of the pid alone is exactly how two daemons end up sharing a GPU.
  */
 
-import { open, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
+import { open, mkdir, readFile, stat, unlink } from "node:fs/promises"
+import { connect } from "node:net"
 import { dirname } from "node:path"
+import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
 
 const log = logger("lock")
@@ -35,12 +44,18 @@ export interface Holder {
   pid: number | null
   /**
    * `held`    - a pid is recorded and alive. Must not start.
-   * `stale`   - a pid is recorded and provably gone. Safe to reclaim.
+   * `stale`   - a pid is recorded and provably gone. Reclaimable, subject to the port.
    * `unknown` - the file exists but has no readable record yet.
    */
   state: "held" | "stale" | "unknown"
   /** True when a pid is recorded and alive, or the record is not yet readable. */
   alive: boolean
+  /**
+   * Port the holder is serving on, from the record. `null` for a lock written by an
+   * older version, or one whose record could not be read — in which case the port check
+   * is skipped and only the pid is trusted.
+   */
+  port: number | null
   /** Path to the lock file. */
   path: string
 }
@@ -66,7 +81,8 @@ export class LockBusy extends Error {
   constructor(readonly holder: Holder) {
     super(
       holder.pid !== null
-        ? `another onesystem daemon holds ${holder.path} (pid ${holder.pid})`
+        ? `another onesystem daemon holds ${holder.path} (pid ${holder.pid}` +
+          (holder.port !== null ? `, serving on port ${holder.port})` : ")")
         : `another onesystem daemon is creating ${holder.path}; its pid is not written yet`,
     )
     this.name = "LockBusy"
@@ -84,20 +100,44 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Is something listening on a loopback port?
+ *
+ * A connect, not a bind: binding would itself be a lock, and would race with the daemon
+ * we are trying to detect. A refused connection is the answer we want, and it is fast.
+ */
+export function servingOn(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = connect({ port, host })
+    const settle = (value: boolean) => {
+      socket.destroy()
+      resolve(value)
+    }
+    socket.setTimeout(timeoutMs, () => settle(false))
+    socket.once("connect", () => settle(true))
+    socket.once("error", (err) => {
+      log.debug("port check", { port, host, error: describeError(err) })
+      settle(false)
+    })
+  })
+}
+
 async function readHolder(path: string): Promise<Holder> {
   let raw: string
   try {
     raw = await readFile(path, "utf8")
   } catch {
-    return { pid: null, state: "unknown", alive: false, path }
+    return { pid: null, state: "unknown", alive: false, port: null, path }
   }
 
   // Written as JSON so the record can grow (port, startedAt) without breaking older
   // readers, and so a truncated write is detectable rather than parsed as 0.
   let pid: number | null = null
+  let port: number | null = null
   try {
-    const parsed = JSON.parse(raw) as { pid?: unknown }
+    const parsed = JSON.parse(raw) as { pid?: unknown; port?: unknown }
     if (typeof parsed.pid === "number") pid = parsed.pid
+    if (typeof parsed.port === "number" && Number.isInteger(parsed.port)) port = parsed.port
   } catch {
     const legacy = Number.parseInt(raw.trim(), 10)
     if (Number.isInteger(legacy)) pid = legacy
@@ -110,14 +150,14 @@ async function readHolder(path: string): Promise<Holder> {
     try {
       ageMs = Date.now() - (await stat(path)).mtimeMs
     } catch {
-      return { pid: null, state: "unknown", alive: true, path }
+      return { pid: null, state: "unknown", alive: true, port, path }
     }
     const settled = ageMs >= UNKNOWN_GRACE_MS
-    return { pid: null, state: settled ? "stale" : "unknown", alive: !settled, path }
+    return { pid: null, state: settled ? "stale" : "unknown", alive: !settled, port, path }
   }
 
   const alive = pidAlive(pid)
-  return { pid, state: alive ? "held" : "stale", alive, path }
+  return { pid, state: alive ? "held" : "stale", alive, port, path }
 }
 
 /**
@@ -176,6 +216,16 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
         continue
       }
 
+      // A dead pid is not sufficient grounds on its own. If the recorded port still
+      // answers, the daemon is serving under a pid we cannot see, and taking the lock
+      // would start a second daemon against a GPU the first one is holding. This is the
+      // check the module header has always claimed; it needs the port the record has
+      // always carried.
+      if (holder.port !== null && (await servingOn(holder.port))) {
+        log.warn("lock holder has a dead pid but is serving", { path, pid: holder.pid, port: holder.port })
+        throw new LockBusy(holder)
+      }
+
       log.warn("reclaiming stale lock", { path, pid: holder.pid, holderState: holder.state })
       try {
         await unlink(path)
@@ -192,10 +242,4 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
 /** Inspect without acquiring. Used by `onesystem status`. */
 export function inspect(path: string): Promise<Holder> {
   return readHolder(path)
-}
-
-/** Write a pid file without taking the lock. Only for `start`, which re-execs. */
-export async function writePid(path: string, info: Record<string, unknown> = {}): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), ...info }, null, 2))
 }

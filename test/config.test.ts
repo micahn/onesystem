@@ -74,9 +74,39 @@ describe("config validation", () => {
   })
 
   test("rejects non-positive numbers rather than silently defaulting", () => {
-    expect(() => validate({ port: 0 }, "test")).toThrow(/port/)
     expect(() => validate({ port: -1 }, "test")).toThrow(/port/)
+    expect(() => validate({ port: 70000 }, "test")).toThrow(/port/)
+    expect(() => validate({ port: 1.5 }, "test")).toThrow(/port/)
     expect(() => validate({ idleShutdownSecs: "soon" }, "test")).toThrow(/idleShutdownSecs/)
+    expect(() => validate({ idleShutdownSecs: 0 }, "test")).toThrow(/idleShutdownSecs/)
+  })
+
+  test("accepts port 0, which asks the kernel for a free one", () => {
+    // Zero is a real request, not a mistake: it is the only way to run a second daemon on
+    // one machine without hand-picking a free port. Every test file used to invent its
+    // own `7000 + random()` and hope.
+    expect(validate({ port: 0 }, "test").port).toBe(0)
+  })
+
+  test("refuses a host that is not loopback", () => {
+    // Asserted in four places and enforced in none. `validate` took any string and
+    // `server.listen` bound it, so `"0.0.0.0"` published an unauthenticated MCP endpoint
+    // to the network. The endpoint has no auth and accepts any size body.
+    expect(() => validate({ host: "0.0.0.0" }, "test")).toThrow(/loopback/)
+    expect(() => validate({ host: "192.168.1.10" }, "test")).toThrow(/loopback/)
+    expect(validate({ host: "127.0.0.1" }, "test").host).toBe("127.0.0.1")
+    expect(validate({ host: "::1" }, "test").host).toBe("::1")
+    expect(validate({ host: "localhost" }, "test").host).toBe("localhost")
+    expect(validate({ host: "127.0.0.2" }, "test").host).toBe("127.0.0.2")
+  })
+
+  test("refuses an idle sweep coarser than the window it guards", () => {
+    // A sweep coarser than the window is mostly harmless on its own — shutdown is just
+    // late. But a window shorter than the interval means the tick which first notices a
+    // backend warm can also decide it went quiet, winding the daemon down under a request
+    // that just completed. The shipped config is 600/5; this is the relationship stated.
+    expect(() => validate({ idleShutdownSecs: 5, idleSweepSecs: 10 }, "test")).toThrow(/idleSweepSecs/)
+    expect(validate({ idleShutdownSecs: 5, idleSweepSecs: 5 }, "test").idleSweepSecs).toBe(5)
   })
 
   test("names the offending field and the source in the message", () => {

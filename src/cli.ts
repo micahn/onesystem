@@ -13,27 +13,45 @@
  * here, every one of them ends up waiting on the same winner. Waiting on health rather
  * than on the child's exit is what makes this correct: the loser's `serve` exits with
  * code 3 and the loser treats that as success, because someone is serving.
+ *
+ * ## `status` is the daemon's machine interface
+ *
+ * The opencode plugin does not import any of this. It runs `status` and reads the JSON,
+ * which makes this payload the seam between the two. That is why `DaemonStatus` lives in
+ * `config.ts` next to the naming rules and the address it reports: the plugin used to
+ * re-derive both, in an anonymous type, from a hardcoded port and an environment variable
+ * no daemon code reads. Now there is one answer to "what should I register, and where",
+ * produced by the same code that decides the answer.
  */
 
 import { spawn } from "node:child_process"
-import { closeSync, openSync } from "node:fs"
+import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import { configDir, configPathOrDefault, loadConfig, lockPath, registrations, stateDir, type Config } from "./config.ts"
+import {
+  configCandidates,
+  configDir,
+  daemonUrl,
+  loadConfig,
+  lockPath,
+  registrations,
+  stateDir,
+  type Config,
+  type DaemonStatus,
+} from "./config.ts"
 import { inspect } from "./lock.ts"
-import { runDaemon, probe } from "./daemon.ts"
+import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
+import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
 
 const log = logger("cli")
 
-function baseUrl(config: Config): string {
-  return `http://${config.host}:${config.port}`
+const USAGE = `usage: onesystem <serve|start|stop|status|config-path>`
+
+function parseArgs(argv: string[]): { command: string } {
+  return { command: argv[0] ?? "status" }
 }
 
-function parseArgs(argv: string[]): { command: string; rest: string[] } {
-  const command = argv[0] ?? "status"
-  return { command, rest: argv.slice(1) }
-}
 
 async function cmdServe(config: Config): Promise<void> {
   await runDaemon(config)
@@ -43,7 +61,7 @@ async function cmdServe(config: Config): Promise<void> {
 }
 
 async function cmdStart(config: Config): Promise<number> {
-  const url = baseUrl(config)
+  const url = daemonUrl(config)
 
   const existing = await probe(url)
   if (existing) {
@@ -81,9 +99,9 @@ async function cmdStart(config: Config): Promise<number> {
       return 0
     }
     if (child.exitCode !== null) {
-      // Exit 3 is LockBusy: we lost the race to a sibling, and that sibling is now
+      // LOCK_BUSY is exit 3: we lost the race to a sibling, and that sibling is now
       // serving. Wait for its health rather than reporting failure.
-      if (child.exitCode === 3) continue
+      if (child.exitCode === LOCK_BUSY_EXIT) continue
       log.error("daemon exited during startup", { code: child.exitCode })
       return child.exitCode ?? 1
     }
@@ -94,7 +112,7 @@ async function cmdStart(config: Config): Promise<number> {
 }
 
 async function cmdStop(config: Config): Promise<number> {
-  const url = baseUrl(config)
+  const url = daemonUrl(config)
   const health = await probe(url)
   if (!health) {
     log.info("no daemon reachable", { url })
@@ -125,13 +143,17 @@ async function cmdStop(config: Config): Promise<number> {
 }
 
 async function cmdStatus(config: Config, configPath: string): Promise<number> {
-  const url = baseUrl(config)
+  const url = daemonUrl(config)
   const health = await probe(url)
   const holder = await inspect(lockPath()).catch(() => null)
 
-  const report = {
+  const report: DaemonStatus = {
     config: configPath,
+    configCandidates: configCandidates(),
     configDir: configDir(),
+    // The address the daemon will actually answer on, from the config it actually
+    // loaded. The plugin registers against this instead of rebuilding a URL from a
+    // default port it has to keep in step with this file.
     url,
     running: health !== null,
     daemon: health,
@@ -145,13 +167,26 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
   return 0
 }
 
+async function cmdConfigPath(): Promise<number> {
+  // The truth about which file is in use, and where the others would be. This used to
+  // print one path from a helper whose own comment claimed it was "the config file that
+  // would be used" — which is wrong for exactly the people who run it, since with no
+  // user config the daemon falls back to the bundled example.
+  const candidates = configCandidates()
+  const inUse = candidates.find((p) => existsSync(p))
+  if (inUse) {
+    process.stdout.write(inUse + "\n")
+  } else {
+    process.stdout.write(`${candidates[0]}\n(no config exists; onesystem would use ${candidates[1]})\n`)
+  }
+  return 0
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const { command } = parseArgs(argv)
 
-  if (command === "config-path") {
-    process.stdout.write(configPathOrDefault() + "\n")
-    return 0
-  }
+  // Before config loading, so it still works with no config file present at all.
+  if (command === "config-path") return cmdConfigPath()
 
   let loaded: { config: Config; path: string }
   try {
@@ -173,9 +208,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     case "status":
       return cmdStatus(config, path)
     default:
-      process.stderr.write(
-        `unknown command: ${command}\nusage: onesystem <serve|start|stop|status|config-path>\n`,
-      )
+      process.stderr.write(`unknown command: ${command}\n${USAGE}\n`)
       return 2
   }
 }
@@ -186,8 +219,14 @@ if (import.meta.main) {
       if (code !== 0) process.exit(code)
     },
     (err) => {
-      process.stderr.write(`onesystem: ${String(err)}\n`)
-      process.exit(1)
+      process.stderr.write(`onesystem: ${describeError(err)}\n`)
+      // `process.exit(1)` here would discard the exit code `runDaemon` set on its way out.
+      // That code is a contract with `onesystem start`: 3 means "a sibling holds the lock
+      // and is serving", which the caller treats as success, because the goal — a daemon
+      // answering on this port — has been met by someone else. Exiting 1 instead made every
+      // lost race look like a crash, so `start` reported failure for a perfectly good
+      // daemon. Preserved via process.exitCode, which `exit` would otherwise overwrite.
+      process.exit(process.exitCode ?? 1)
     },
   )
 }
