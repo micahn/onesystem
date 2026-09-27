@@ -68,10 +68,15 @@ per-session stdio entry:
 
 ```jsonc
 {
-  "plugins": [{ "package": "/home/micah/Projects/onesystem/src/plugin/index.ts" }],
+  "plugins": [{ "package": "/home/micah/Projects/onesystem/src/plugin" }],
   "mcp": { "servers": { /* delete the old "laya-mcp" local entry */ } }
 }
 ```
+
+`package` must be the **directory**, not the `index.ts` file. Pointing it at the file
+fails with `configured plugin path must be a directory` in
+`~/.local/share/opencode/log/opencode.log`, and the session ends up with no `laya` tools
+and no other symptom. opencode resolves the entrypoint inside the directory itself.
 
 Removing the old entry is the part that matters. It is a `type: "local"` stdio server, so
 as long as it is configured, every session keeps its own laya process and its own copy of
