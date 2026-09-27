@@ -1,0 +1,49 @@
+{
+  "host": "127.0.0.1",
+  "port": 7331,
+
+  // Wind down after this long with no traffic. Long on purpose: a model load costs
+  // 20-54s and 3 GB of VRAM, so exiting sooner than this just moves the cost to the
+  // next session. The daemon exits once nothing is warm, releasing the port and the GPU.
+  "idleShutdownSecs": 600,
+
+  // How often the idle check runs. A timestamp compare, so this can be cheap.
+  "idleSweepSecs": 5,
+
+  // Ceiling on one forwarded MCP call. Matches LAYA_TOOL_TIMEOUT_SECS in the shim.
+  "requestTimeoutSecs": 120,
+
+  "backends": {
+    "laya": {
+      "transport": "stdio-mcp",
+      // The shim, not bare laya: it owns interpreter selection (the ROCm torch build
+      // in the pipx venv, not the mise one that reports no CUDA device), the idle
+      // unload watchdog, and the per-call timeout.
+      //
+      // LAYA_PYTHON must be set here. The shim reads it from its own environment, and
+      // it is NOT inherited from the shell: `onesystem start` runs wherever you invoke
+      // it, and LAYA_PYTHON only exists inside opencode.json's MCP environment block.
+      // Omit it and the shim falls back to the mise interpreter, cannot import laya,
+      // and dies on startup -- a failure that is easy to miss because the daemon keeps
+      // answering with error payloads.
+      "command": ["/home/micah/.config/opencode/bin/laya-mcp-idle-server"],
+      "env": {
+        "LAYA_DEVICE": "cuda",
+        "LAYA_PRELOAD": "0",
+        "LAYA_IDLE_UNLOAD_SECS": "300",
+        "LAYA_TOOL_TIMEOUT_SECS": "120",
+        "LAYA_PYTHON": "/home/micah/.local/share/pipx/venvs/laya/bin/python"
+      },
+      "startupTimeoutSecs": 180
+    },
+
+    "rev": {
+      "transport": "systemone-http",
+      // Already-running service speaking POST /v1/systemone. onesystem does not
+      // start it. Disabled until there is something listening.
+      "baseUrl": "http://127.0.0.1:8000",
+      "startupTimeoutSecs": 30,
+      "enabled": false
+    }
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# Local runtime state, if anyone points ONESYSTEM_* at the repo.
+.onesystem/
+*.lock

@@ -1,0 +1,28 @@
+{
+  "name": "onesystem",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One shared System 1 decision service on the GPU, fronted over HTTP, consumed by opencode sessions.",
+  "license": "MIT",
+  "bin": {
+    "onesystem": "./src/cli.ts"
+  },
+  "scripts": {
+    "serve": "bun run src/cli.ts serve",
+    "start": "bun run src/cli.ts start",
+    "stop": "bun run src/cli.ts stop",
+    "status": "bun run src/cli.ts status",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.18",
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}
