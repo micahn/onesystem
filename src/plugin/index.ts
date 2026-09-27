@@ -92,14 +92,21 @@ function run(cmd: string, args: string[]): Promise<number> {
 }
 
 /**
- * Read the backend list without booting a daemon.
+ * Read what to register, without booting a daemon.
  *
- * The plugin needs to know which servers to register, and `onesystem status` is the
- * one command that answers without loading anything. A failure here is not fatal: the
- * transform below falls back to a `laya`-shaped default so a misconfigured install
- * still registers something rather than silently exposing no tools.
+ * `onesystem status` is the one command that answers without loading anything, and it
+ * reports the resolved server names rather than a restatement of the config. The plugin
+ * consumes those directly instead of re-deriving the naming rules, because a plugin that
+ * computes its own names can disagree with the daemon about what the tools are called --
+ * and that shows up only as a missing tool.
+ *
+ * A failure here is not fatal: fall back to a single `onesystem` server so a
+ * misconfigured install still exposes something rather than silently exposing nothing.
  */
-async function listBackends(command: string, args: string[]): Promise<string[]> {
+async function listBackends(
+  command: string,
+  args: string[],
+): Promise<{ backend: string; serverName: string }[]> {
   const out = await new Promise<string>((resolve) => {
     const child = spawn(command, [...args, "status"], { stdio: ["ignore", "pipe", "pipe"] })
     let stdout = ""
@@ -108,8 +115,10 @@ async function listBackends(command: string, args: string[]): Promise<string[]> 
     child.on("close", () => resolve(stdout))
   })
   try {
-    const parsed = JSON.parse(out) as { configuredBackends?: { name: string; enabled: boolean }[] }
-    return (parsed.configuredBackends ?? []).filter((b) => b.enabled).map((b) => b.name)
+    const parsed = JSON.parse(out) as {
+      registrations?: { backend: string; serverName: string }[]
+    }
+    return parsed.registrations ?? []
   } catch {
     return []
   }
@@ -141,13 +150,13 @@ export default Plugin.define({
     }
 
     const configured = await listBackends(command, args)
-    const names = configured.length > 0 ? configured : ["laya"]
+    const targets = configured.length > 0 ? configured : [{ backend: "laya", serverName: "onesystem" }]
 
     const registration = await ctx.mcp.transform((editor) => {
-      for (const name of names) {
-        editor.set(name, {
+      for (const { backend, serverName } of targets) {
+        editor.set(serverName, {
           type: "remote",
-          url: `${base}/mcp/${name}`,
+          url: `${base}/mcp/${backend}`,
           // Loopback-only service with no auth. OAuth is for remote servers; enabling
           // it here would just make every session stop and ask for credentials.
           oauth: false,
@@ -156,7 +165,7 @@ export default Plugin.define({
       }
     })
 
-    log("registered backends", { names, base, startupMs })
+    log("registered backends", { targets: targets.map((t) => t.serverName), base, startupMs })
 
     return async () => {
       // Registration only. The daemon is shared and outlives any single session; see

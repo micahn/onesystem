@@ -22,6 +22,12 @@ export interface Backend {
   readonly name: string
   readonly transport: "stdio-mcp" | "systemone-http"
   readonly state: BackendState
+  /**
+   * Product prefix stripped from this backend's tool names by the HTTP front, if any.
+   * The bridge needs it in both directions, so it lives on the backend rather than
+   * being re-read from config at the edge.
+   */
+  readonly toolPrefix?: string
   /** Wall-clock ms of the last completed or started forward. Drives idle shutdown. */
   lastActivityAt: number
   /** In-flight forwards. The daemon never idles out from under one. */

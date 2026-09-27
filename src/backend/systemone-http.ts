@@ -46,6 +46,10 @@ export class SystemOneBackendImpl implements Backend {
     return this.#state
   }
 
+  get toolPrefix(): string | undefined {
+    return this.spec.toolPrefix
+  }
+
   /** No-op, and not merely because it is cheap: there is no process to own. */
   async start(): Promise<void> {
     this.lastActivityAt = Date.now()

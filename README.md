@@ -27,9 +27,12 @@ onesystem fixes all three by making the model a single shared resource with one 
 ## How it works
 
 ```
- opencode session A ─┐
+  opencode session A ─┐
  opencode session B ─┼─→ plugin ──→ onesystem daemon ──→ laya (stdio MCP)  ──→ GPU
  opencode session C ─┘   (V2)         (one, locked)  └─→ rev  (systemone-http)
+
+Tools are exposed as `onesystem.<tool>`: `onesystem.predict`, `onesystem.route`,
+`onesystem.status`, `onesystem.preset`.
 ```
 
 - The **plugin** runs in every session. It ensures one daemon is up and registers one
@@ -116,6 +119,22 @@ version.
 | `requestTimeoutSecs` | `120` | Ceiling on one forwarded call. |
 | `backends` | `{}` | See below. |
 
+### Naming
+
+The MCP server is registered as `onesystem`, and each backend's `toolPrefix` is stripped
+from its tool names, so laya's `laya_predict` is presented as `onesystem.predict`. The
+rename happens in both directions: stripped on the way out to opencode, restored on the
+way in to the process. Doing it in one direction only would advertise a name the backend
+cannot answer to.
+
+`toolPrefix` is explicit rather than inferred. The daemon has no way to know that a
+backend happens to prefix its tools with its own product name, and a wrong guess would
+silently rename every tool.
+
+With one backend enabled the server is named `onesystem`. With several, they become
+`onesystem-<backend>` so two backends cannot claim the same name; set `serverName`
+explicitly to override.
+
 ### Backends
 
 Two transports, because the System 1 landscape does not agree on one.
@@ -165,6 +184,7 @@ a process backend.
 | First `tools/call` | Backend spawns. Costs 10-54s and ~3 GB VRAM. |
 | Idle for `idleShutdownSecs` | Backend stops; when nothing is warm the daemon exits. |
 | Session closes | Registration dropped. **Daemon left running** — see below. |
+| Catalog changes | opencode caches tool names per session, so a rename needs a session restart. |
 | `onesystem stop` | Everything stops now. |
 
 A session closing does not stop the daemon. Sessions close independently, so one closing

@@ -19,10 +19,14 @@ import { appendFileSync } from "node:fs"
 const marker = process.env.FAKE_MCP_MARKER
 if (marker) appendFileSync(marker, "spawned\n")
 
+// Configurable so a test can model a backend that prefixes its tools with its own
+// product name, which is the case the bridge's `toolPrefix` exists to undo.
+const toolName = process.env.FAKE_MCP_TOOL ?? "decide"
+
 const server = new Server({ name: "fake-system1", version: "0.0.1" }, { capabilities: { tools: {} } })
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{ name: "decide", description: "test tool", inputSchema: { type: "object" } }],
+  tools: [{ name: toolName, description: "test tool", inputSchema: { type: "object" } }],
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {

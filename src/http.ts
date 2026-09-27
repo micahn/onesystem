@@ -36,6 +36,7 @@ import {
   GetPromptRequestSchema,
   ListPromptsRequestSchema,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js"
@@ -62,11 +63,35 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
       { capabilities: { tools: {}, prompts: {}, resources: {} } },
     )
 
+    const backend = supervisor.get(backendName)
+    const prefix = backend.toolPrefix
+
     // Every handler is a straight forward. The supervisor is what decides whether that
     // costs a model load, so nothing here needs to know about VRAM or cold starts.
     const forward = (method: string) => async (req: { params?: Record<string, unknown> }) => {
-      const result = await supervisor.handle(backendName, method, req.params as Record<string, unknown> | undefined)
-      return (result ?? {}) as never
+      const params = { ...(req.params ?? {}) } as Record<string, unknown>
+
+      // Restore the backend's own prefix on the way in. opencode knows the tool as
+      // `predict`; the process only answers to `laya_predict`.
+      if (method === "tools/call" && prefix && typeof params.name === "string") {
+        params.name = prefix + params.name
+      }
+
+      const result = (await supervisor.handle(backendName, method, params)) ?? {}
+
+      // And strip it again on the way out, so the catalog opencode caches reads
+      // `predict`. Renaming only in one direction would break the other.
+      if (method === "tools/list" && prefix) {
+        const tools = (result as { tools?: { name?: string }[] }).tools
+        if (Array.isArray(tools)) {
+          for (const tool of tools) {
+            if (typeof tool.name === "string" && tool.name.startsWith(prefix)) {
+              tool.name = tool.name.slice(prefix.length)
+            }
+          }
+        }
+      }
+      return result as never
     }
 
     server.setRequestHandler(ListToolsRequestSchema, forward("tools/list") as never)
@@ -75,6 +100,13 @@ export async function serve(config: Config, supervisor: Supervisor): Promise<Run
     server.setRequestHandler(GetPromptRequestSchema, forward("prompts/get") as never)
     server.setRequestHandler(ListResourcesRequestSchema, forward("resources/list") as never)
     server.setRequestHandler(ReadResourceRequestSchema, forward("resources/read") as never)
+    // Advertising the `resources` capability makes opencode ask for templates on every
+    // connect. Without this handler it logs "Method not found" once per session per
+    // reconnect, which is pure noise from a capability we advertised and did not serve.
+    server.setRequestHandler(
+      ListResourceTemplatesRequestSchema,
+      forward("resources/templates/list") as never,
+    )
 
     return server
   }

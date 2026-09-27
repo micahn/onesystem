@@ -76,6 +76,10 @@ export class StdioMcpBackend implements Backend {
     return this.#state
   }
 
+  get toolPrefix(): string | undefined {
+    return this.spec.toolPrefix
+  }
+
   async start(): Promise<void> {
     if (this.#state === "warm") return
     if (this.#starting) return this.#starting

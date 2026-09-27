@@ -19,7 +19,7 @@ import { spawn } from "node:child_process"
 import { closeSync, openSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import { configDir, configPathOrDefault, loadConfig, lockPath, stateDir, type Config } from "./config.ts"
+import { configDir, configPathOrDefault, loadConfig, lockPath, registrations, stateDir, type Config } from "./config.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe } from "./daemon.ts"
 import { logger } from "./log.ts"
@@ -136,11 +136,9 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
     running: health !== null,
     daemon: health,
     lock: holder,
-    configuredBackends: Object.entries(config.backends).map(([name, spec]) => ({
-      name,
-      transport: spec.transport,
-      enabled: spec.enabled !== false,
-    })),
+    // The names the plugin will actually register, not a restatement of the config, so
+    // `status` and the live tool surface cannot drift apart.
+    registrations: registrations(config),
     idleShutdownSecs: config.idleShutdownSecs,
   }
   process.stdout.write(JSON.stringify(report, null, 2) + "\n")

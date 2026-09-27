@@ -34,7 +34,13 @@
         "LAYA_TOOL_TIMEOUT_SECS": "120",
         "LAYA_PYTHON": "/home/micah/.local/share/pipx/venvs/laya/bin/python"
       },
-      "startupTimeoutSecs": 180
+      "startupTimeoutSecs": 180,
+
+      // Registered as the `onesystem` MCP server, with `laya_` stripped from tool
+      // names, so the surface reads `onesystem.predict` rather than
+      // `onesystem.laya_predict`. The prefix is explicit because the daemon cannot know
+      // a backend prefixes its tools with its own product name.
+      "toolPrefix": "laya_"
     },
 
     "rev": {

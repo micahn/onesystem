@@ -22,7 +22,30 @@ import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 
 export type Transport = "stdio-mcp" | "systemone-http"
 
-export interface StdioBackend {
+/**
+ * How a backend presents itself to opencode.
+ *
+ * Tool names are rewritten on the way through so the surface reads
+ * `onesystem.predict` rather than `onesystem.laya_predict`. The prefix is stripped
+ * explicitly rather than guessed: the daemon cannot know that a backend's tools happen
+ * to be prefixed with its own product name, and a wrong guess would silently rename
+ * every tool. An unset prefix means names pass through untouched.
+ */
+export interface BackendNaming {
+  /**
+   * Stripped from tool names as they cross the bridge, and added back on the way in.
+   * `"laya_"` turns `laya_predict` into `predict`.
+   */
+  toolPrefix?: string
+  /**
+   * Name opencode registers this backend's MCP server under. Defaults to `onesystem`
+   * when exactly one backend is enabled, and `onesystem-<backend>` otherwise, so two
+   * backends cannot claim the same server name.
+   */
+  serverName?: string
+}
+
+export interface StdioBackend extends BackendNaming {
   transport: "stdio-mcp"
   /** Executable plus args. First element is the program. */
   command: string[]
@@ -32,7 +55,7 @@ export interface StdioBackend {
   startupTimeoutSecs?: number
 }
 
-export interface SystemOneBackend {
+export interface SystemOneBackend extends BackendNaming {
   transport: "systemone-http"
   /** Base URL of a running service, without the /v1/systemone path. */
   baseUrl: string
@@ -81,6 +104,36 @@ export function lockPath(): string {
 
 export function defaultConfigPath(): string {
   return join(configDir(), "onesystem.json")
+}
+
+export interface BackendRegistration {
+  /** Backend name, as used in the URL path `/mcp/<backend>`. */
+  backend: string
+  /** Name opencode should register the MCP server under. */
+  serverName: string
+  /** Prefix stripped from this backend's tool names, if any. */
+  toolPrefix?: string
+  transport: Transport
+}
+
+/**
+ * Work out what opencode should register, and how tools should be named.
+ *
+ * Lives here rather than in the plugin so the plugin does not have to re-derive it,
+ * and so `onesystem status` can report the same names the plugin will actually use.
+ * A mismatch there is the kind of thing that is only noticed when a tool is missing.
+ */
+export function registrations(config: Config): BackendRegistration[] {
+  const enabled = Object.entries(config.backends).filter(([, spec]) => spec.enabled !== false)
+  const single = enabled.length === 1
+  return enabled.map(([backend, spec]) => ({
+    backend,
+    // One backend gets the clean name. Several cannot all be `onesystem`, so the rest
+    // are qualified rather than silently overwriting each other in opencode's registry.
+    serverName: spec.serverName ?? (single ? "onesystem" : `onesystem-${backend}`),
+    toolPrefix: spec.toolPrefix,
+    transport: spec.transport,
+  }))
 }
 
 /** Where a bundled example lives, used when the user has no config yet. */
@@ -142,6 +195,8 @@ export function validate(raw: unknown, source: string): Config {
           `${source}: backends.${name}.startupTimeoutSecs`,
           180,
         ),
+        toolPrefix: entry.toolPrefix as string | undefined,
+        serverName: entry.serverName as string | undefined,
         enabled: entry.enabled !== false,
       }
     } else if (transport === "systemone-http") {
@@ -156,6 +211,8 @@ export function validate(raw: unknown, source: string): Config {
           `${source}: backends.${name}.startupTimeoutSecs`,
           30,
         ),
+        toolPrefix: entry.toolPrefix as string | undefined,
+        serverName: entry.serverName as string | undefined,
         enabled: entry.enabled !== false,
       }
     } else {
