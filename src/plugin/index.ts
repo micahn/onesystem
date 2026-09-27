@@ -46,12 +46,23 @@
  */
 
 import { Plugin } from "@opencode/plugin"
-import { spawn } from "node:child_process"
-import { basename } from "node:path"
-import type { DaemonStatus } from "../config.ts"
-import { isLoopbackHost } from "../config.ts"
 import { healthy } from "../health.ts"
-import { formatLine } from "../log.ts"
+import { askDaemon, defaultCli, pluginLog as log, run } from "./discover.ts"
+
+/**
+ * MCP timeouts for the servers we register.
+ *
+ * opencode's default `mcp.timeout.startup` is 30s, shorter than a cold load, so without
+ * these a cold backend reads as a failed MCP server. Measured on this machine: a cold
+ * `laya` load is 20-54s, and the shim is silent for another 25-30s while it imports
+ * transformers before it binds stdio.
+ */
+const DEFAULTS = {
+  startupMs: 180_000,
+  catalogMs: 60_000,
+  // Matches LAYA_TOOL_TIMEOUT_SECS, the ceiling the shim enforces on a single call.
+  executionMs: 120_000,
+}
 
 export interface OnesystemOptions {
   /**
@@ -67,84 +78,6 @@ export interface OnesystemOptions {
   startupMs?: number
   catalogMs?: number
   executionMs?: number
-}
-
-/**
- * Find a runtime that can actually execute a .ts file.
- *
- * `process.execPath` is only a JS runtime when the host happens to be one. OpenCode
- * ships as a compiled single-file executable, so inside a plugin `process.execPath` is
- * the opencode binary itself. Spawning it with a script path does not run the script:
- * opencode's own CLI treats the path as a stray directory argument, prints its help,
- * and exits 1. The daemon is then never started and every session sees a registered
- * MCP server pointing at a port nothing is listening on -- reported as
- * "Unable to connect", which reads like a network fault rather than a bad argv.
- */
-function runtime(): string {
-  const exe = basename(process.execPath).toLowerCase()
-  if (exe === "bun" || exe === "bun.exe") return process.execPath
-  // OpenCode is launched from a shell that has the real runtime on PATH, and it passes
-  // that environment to plugins, so this resolves even though execPath does not.
-  return Bun.which("bun") ?? process.execPath
-}
-
-/**
- * Resolve the CLI that ships next to this plugin.
- *
- * The alternative is defaulting to `onesystem` on PATH, which is a trap: a plugin
- * loaded from a checkout has no reason to be on PATH, and when it is not, every spawn
- * fails with a bare ENOENT and the session silently ends up with no tools. Deriving the
- * script from `import.meta.url` means the plugin works straight from a clone with no
- * install step, and resolving the interpreter separately keeps that true when the host
- * is not itself a runtime.
- */
-function defaultCli(): { command: string; args: string[] } {
-  return { command: runtime(), args: [new URL("../cli.ts", import.meta.url).pathname] }
-}
-
-const DEFAULTS = {
-  // Measured on this machine: a cold `laya` load is 20-54s, and the shim is silent for
-  // another 25-30s while it imports transformers before it binds stdio.
-  startupMs: 180_000,
-  catalogMs: 60_000,
-  // Matches LAYA_TOOL_TIMEOUT_SECS, the ceiling the shim enforces on a single call.
-  executionMs: 120_000,
-}
-
-/**
- * Same line format as the daemon's, from the daemon's own formatter.
- *
- * It used to be written out by hand to the same convention, which meant two
- * implementations of a format that exists to be greppable — and no way to assert either.
- */
-function log(msg: string, extra?: Record<string, unknown>) {
-  process.stderr.write(formatLine("plugin", "info", msg, extra))
-}
-
-/**
- * Run a command and resolve with its exit code, never rejecting.
- *
- * stderr is reported on a non-zero exit. It is the only place the real reason shows up:
- * a wrong interpreter exits 1 having printed nothing useful to an exit code, and
- * reporting just `code` turns that into an unexplained missing daemon.
- */
-function run(cmd: string, args: string[]): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] })
-    let stderr = ""
-    child.stderr?.on("data", (d) => {
-      stderr += String(d)
-      if (stderr.length > 4000) stderr = stderr.slice(-4000)
-    })
-    child.on("error", (err) => {
-      log("failed to spawn onesystem", { cmd, error: String(err) })
-      resolve(127)
-    })
-    child.on("close", (code) => {
-      if (code) log("command failed", { cmd, args, code, stderr: stderr.trim().slice(-800) })
-      resolve(code ?? 1)
-    })
-  })
 }
 
 /**
@@ -173,79 +106,6 @@ export function belongsToServer(tool: string, serverNames: readonly string[]): b
  */
 export { healthy } from "../health.ts"
 
-/**
- * What the plugin needs to register servers: the address, and the names.
- *
- * One call to `onesystem status` answers both. They used to come from two places — the
- * JSON for the names, and a rebuilt URL from environment variables for the address —
- * which is why they could disagree.
- */
-interface DaemonAnswer {
-  url: string
-  registrations: { backend: string; serverName: string }[]
-}
-
-/**
- * Ask the CLI what to register, and where.
- *
- * `status` is the one command that answers without loading anything, and it reports the
- * resolved server names and the resolved address rather than a restatement of the
- * config. The plugin consumes those directly instead of re-deriving them, because a
- * plugin that computes its own names can disagree with the daemon about what the tools
- * are called -- and that shows up only as a missing tool.
- *
- * A failure here is not fatal: fall back to a single `onesystem` server so a misconfigured
- * install still exposes something rather than silently exposing nothing. The fallback
- * address is checked against loopback for the same reason the daemon's is: a bad override
- * must not put a URL on the network.
- */
-async function askDaemon(command: string, args: string[]): Promise<DaemonAnswer | null> {
-  const out = await new Promise<string>((resolve) => {
-    const child = spawn(command, [...args, "status"], { stdio: ["ignore", "pipe", "pipe"] })
-    let stdout = ""
-    child.stdout?.on("data", (d) => (stdout += String(d)))
-    child.on("error", () => resolve(""))
-    child.on("close", () => resolve(stdout))
-  })
-  try {
-    const parsed = JSON.parse(out) as Partial<DaemonStatus>
-    if (typeof parsed.url !== "string" || !Array.isArray(parsed.registrations)) return null
-    return { url: parsed.url, registrations: parsed.registrations }
-  } catch {
-    return null
-  }
-}
-
-/**
- * An explicit address override, or null.
- *
- * `ONESYSTEM_PORT` is an escape hatch for a daemon on a non-default port, not the normal
- * path — the normal path is the answer from `status`. It is validated here because the
- * old code did `Number(process.env.ONESYSTEM_PORT ?? 7331)` and would happily register
- * `http://127.0.0.1:NaN`, which fails at the tool call rather than at startup.
- */
-function addressOverride(): string | null {
-  const port = process.env.ONESYSTEM_PORT
-  const host = process.env.ONESYSTEM_HOST
-  if (port === undefined && host === undefined) return null
-
-  const parsedPort = port === undefined ? NaN : Number(port)
-  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-    log("ONESYSTEM_PORT is not a valid port; ignoring the override", { value: port })
-    return null
-  }
-  const resolvedHost = host ?? "127.0.0.1"
-  if (!isLoopbackHost(resolvedHost)) {
-    log("ONESYSTEM_HOST is not a loopback address; ignoring the override", { value: host })
-    return null
-  }
-  log("using an explicit address override instead of the daemon's own", {
-    host: resolvedHost,
-    port: parsedPort,
-  })
-  return `http://${resolvedHost}:${parsedPort}`
-}
-
 export default Plugin.define({
   id: "onesystem",
 
@@ -266,10 +126,10 @@ export default Plugin.define({
     }
 
     // The daemon's own answer, asked for after `start` so a daemon that was just spawned
-    // is included. This is the only source of the address in the normal path.
+    // is included. This is the only source of the address in the normal path. The
+    // registrations come from the same payload, so the two cannot disagree.
     const answer = await askDaemon(command, args)
-    const override = addressOverride()
-    const base = override ?? answer?.url
+    const base = answer?.url ?? null
     if (!base) {
       log("could not determine the daemon address; registering nothing", {
         hint: "run `onesystem status` to see why",

@@ -6,15 +6,12 @@
  *   1. The `Backend` interface is a real seam — two adapters sit behind it — so it is the
  *      test surface. A fake that implements it is the correct way to exercise anything
  *      that is not a backend, and it needs no child process and no GPU.
- *   2. The lifecycle rules in the stdio adapter (the stop/start race, cancellation, the
- *      idle window) are about timing. Reproducing them against a real spawned process
- *      means sleeping for tens of seconds and hoping; against a fake whose `start` is a
- *      promise the test controls, they are exact.
+ *   2. Cancellation and the idle window are policy, not process management, so a fake is
+ *      the honest way to test them: no sleeps, no child, no clock drift.
  *
- * `DeferredBackend` is the interesting one: it lets a test hold a start open, quiesce in
- * the middle of it, and assert what the world looks like afterwards. That is the exact
- * race that used to leave a live process holding VRAM after the daemon believed it had
- * stopped.
+ * The stop/start race is *not* here. That one is about whether a real spawned process is
+ * actually reaped, so it is tested against a real one in `lifecycle.test.ts` with
+ * `slow-mcp.ts` — a fake could only assert that it was told to quiesce.
  */
 
 import type { Backend, BackendState, BackendStatus, CallContext } from "../../src/backend/types.ts"
@@ -99,74 +96,6 @@ export class FakeBackend implements Backend {
       inflight: this.busy ? 1 : 0,
       idleMs: this.#idleMs,
       local: this.local,
-    }
-  }
-}
-
-/**
- * A backend whose `start` can be held open, so a test can interleave.
- *
- * `handshake` is the gate: `call` awaits it before going warm, which is exactly the
- * 20-54s window a real cold load opens during which a shutdown can arrive.
- */
-export class DeferredBackend implements Backend {
-  readonly name = "deferred"
-  readonly transport = "stdio-mcp" as const
-  readonly local = true
-  toolPrefix: string | undefined
-
-  #state: BackendState = "cold"
-  #release!: () => void
-  #entered!: () => void
-  #enteredPromise: Promise<void>
-  /** Resolves once a call has reached the gate. */
-  readonly entered: Promise<void>
-  /** Set if a call started after quiesce returned — the bug, if it happens. */
-  startedAfterQuiesce = false
-  quiesceReturned = false
-  publishedAfterQuiesce = false
-
-  constructor() {
-    this.#enteredPromise = new Promise<void>((r) => {
-      this.#entered = r
-    })
-    this.entered = this.#enteredPromise
-  }
-
-  /** Let the held start proceed. */
-  release(): void {
-    this.#release()
-  }
-
-  get state(): BackendState {
-    return this.#state
-  }
-
-  async call(ctx: CallContext): Promise<unknown> {
-    if (this.quiesceReturned) this.startedAfterQuiesce = true
-    this.#state = "starting"
-    this.#entered()
-    await new Promise<void>((r) => {
-      this.#release = r
-    })
-    if (this.quiesceReturned) this.publishedAfterQuiesce = true
-    this.#state = "warm"
-    return { content: [{ type: "text", text: "ok" }] }
-  }
-
-  async quiesce(): Promise<void> {
-    this.quiesceReturned = true
-    this.#state = "cold"
-  }
-
-  describe(): BackendStatus {
-    return {
-      name: this.name,
-      transport: this.transport,
-      state: this.#state,
-      inflight: 0,
-      idleMs: 0,
-      local: true,
     }
   }
 }

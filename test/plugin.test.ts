@@ -168,6 +168,7 @@ describe("plugin recovery", () => {
     // The fake CLI reports the live port, so the probe the plugin runs is a real one.
     const cli = await fakeCli(marker, `http://127.0.0.1:${port}`)
 
+
     const fake = await setup({ ...cli }, marker)
     await fake.before("onesystem_predict")
 
@@ -286,24 +287,17 @@ describe("address resolution", () => {
     expect(seen.url).toBe("http://127.0.0.1:9999/mcp/laya")
   })
 
-  test("a non-numeric ONESYSTEM_PORT is ignored rather than registered as NaN", async () => {
-    // The old code did `Number(env ?? 7331)`, which registered `http://127.0.0.1:NaN`
-    // and failed at the tool call instead of at startup.
+  test("no environment variable can redirect the plugin to another port", async () => {
+    // `ONESYSTEM_PORT` and `ONESYSTEM_HOST` are gone. They were read here and by no daemon
+    // module, so setting one only worked if you also set the same value in the config --
+    // which `status` already reports. Two sources of truth that could only disagree.
     const cli = await cliReporting("http://127.0.0.1:9999")
-    const previous = process.env.ONESYSTEM_PORT
-    process.env.ONESYSTEM_PORT = "not-a-port"
-    cleanups.push(async () => void (process.env.ONESYSTEM_PORT = previous))
-
-    const seen = await register(cli)
-    // Ignored, so the daemon's own address stands.
-    expect(seen.url).toBe("http://127.0.0.1:9999/mcp/laya")
-  })
-
-  test("a non-loopback ONESYSTEM_HOST is refused", async () => {
-    const cli = await cliReporting("http://127.0.0.1:9999")
-    const previous = process.env.ONESYSTEM_HOST
+    const previous = { port: process.env.ONESYSTEM_PORT, host: process.env.ONESYSTEM_HOST }
+    process.env.ONESYSTEM_PORT = "1234"
     process.env.ONESYSTEM_HOST = "0.0.0.0"
-    cleanups.push(async () => void (process.env.ONESYSTEM_HOST = previous))
+    cleanups.push(
+      async () => void (process.env.ONESYSTEM_PORT = previous.port, process.env.ONESYSTEM_HOST = previous.host),
+    )
 
     const seen = await register(cli)
     expect(seen.url).toBe("http://127.0.0.1:9999/mcp/laya")

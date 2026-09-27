@@ -106,7 +106,7 @@ export function pidAlive(pid: number): boolean {
  * A connect, not a bind: binding would itself be a lock, and would race with the daemon
  * we are trying to detect. A refused connection is the answer we want, and it is fast.
  */
-export function servingOn(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+function servingOn(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const socket = connect({ port, host })
     const settle = (value: boolean) => {
