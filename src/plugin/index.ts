@@ -33,7 +33,10 @@ import { Plugin } from "@opencode/plugin"
 import { spawn } from "node:child_process"
 
 export interface OnesystemOptions {
-  /** Executable used to start the daemon. Defaults to `onesystem` on PATH. */
+  /**
+   * Executable used to start the daemon. Defaults to the current runtime, which is
+   * correct when opencode loads this plugin from a checkout.
+   */
   command?: string
   /** Extra args inserted before the subcommand. */
   args?: string[]
@@ -43,6 +46,19 @@ export interface OnesystemOptions {
   startupMs?: number
   catalogMs?: number
   executionMs?: number
+}
+
+/**
+ * Resolve the CLI that ships next to this plugin.
+ *
+ * The alternative is defaulting to `onesystem` on PATH, which is a trap: a plugin
+ * loaded from a checkout has no reason to be on PATH, and when it is not, every spawn
+ * fails with a bare ENOENT and the session silently ends up with no tools. Deriving it
+ * from `import.meta.url` means the plugin works straight from a clone with no install
+ * step and no PATH assumptions.
+ */
+function defaultCli(): { command: string; args: string[] } {
+  return { command: process.execPath, args: [new URL("../cli.ts", import.meta.url).pathname] }
 }
 
 const DEFAULTS = {
@@ -104,8 +120,9 @@ export default Plugin.define({
 
   async setup(ctx) {
     const options = (ctx.options ?? {}) as OnesystemOptions
-    const command = options.command ?? "onesystem"
-    const args = options.args ?? []
+    const fallback = defaultCli()
+    const command = options.command ?? fallback.command
+    const args = options.args ?? fallback.args
     const startupMs = options.startupMs ?? DEFAULTS.startupMs
     const catalogMs = options.catalogMs ?? DEFAULTS.catalogMs
     const executionMs = options.executionMs ?? DEFAULTS.executionMs

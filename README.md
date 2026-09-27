@@ -63,19 +63,28 @@ mkdir -p ~/.config/onesystem
 cp onesystem.config.json ~/.config/onesystem/onesystem.json
 ```
 
-Then point opencode at the plugin:
+Then in `~/.config/opencode/opencode.json`, register the plugin and **remove** the old
+per-session stdio entry:
 
 ```jsonc
-// ~/.config/opencode/opencode.json
 {
   "plugins": [{ "package": "/home/micah/Projects/onesystem/src/plugin/index.ts" }],
-  "mcp": { "servers": { "laya": { "type": "local", "disabled": true } } }
+  "mcp": { "servers": { /* delete the old "laya-mcp" local entry */ } }
 }
 ```
 
-The `disabled: true` on the old stdio entry matters: leaving it enabled keeps one
-per-session model alive, which is the thing being removed. The plugin registers `laya`
-itself, over HTTP, sharing the one daemon.
+Removing the old entry is the part that matters. It is a `type: "local"` stdio server, so
+as long as it is configured, every session keeps its own laya process and its own copy of
+the checkpoint — which is the entire problem this project exists to solve. The plugin
+registers `laya` itself, over HTTP, sharing one daemon.
+
+The plugin needs no options: it derives the CLI path from its own location, so it works
+from a checkout with nothing on `PATH`. Override via `options` for a specific executable
+or different timeouts.
+
+**Restart opencode after this change.** Plugins load at server startup; editing the config
+reconnects MCP servers but does not load a newly added plugin. Until you restart, the
+session has no `laya` tools at all.
 
 ## Use
 
