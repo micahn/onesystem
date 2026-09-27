@@ -34,6 +34,16 @@ export interface ModelSpec {
    * payloads. The installer writes it.
    */
   readonly interpreterEnv?: string
+  /**
+   * A model whose Python package is not on PyPI and has to be fetched.
+   *
+   * `laya` is a wheel; Julia-1 is a repository that ships its package alongside a 550 MB
+   * checkpoint, and the two have to be fetched differently. A git source is the obvious
+   * spelling and does not work: a clone of a Hugging Face repo pulls the LFS weights, so
+   * `uv lock` on the git source spends its time downloading 584 MB to read a `pyproject`.
+   * So the package files are fetched on their own and installed from a local path.
+   */
+  readonly source?: { readonly repo: string; readonly allow: readonly string[] }
 }
 
 export const MODELS: readonly ModelSpec[] = [
@@ -42,6 +52,14 @@ export const MODELS: readonly ModelSpec[] = [
     requirement: "laya[mcp]==0.3.21",
     requiresPython: ">=3.12,<3.15",
     interpreterEnv: "LAYA_PYTHON",
+  },
+  {
+    name: "julia",
+    // The distribution name is not the model name; the repo's pyproject says
+    // `supersonic-julia`, and a source whose metadata name disagrees is refused.
+    requirement: "supersonic-julia==0.1.0",
+    requiresPython: ">=3.11,<3.15",
+    source: { repo: "SupersonicLabs/Julia-1", allow: ["julia/**", "pyproject.toml", "README.md"] },
   },
 ]
 
