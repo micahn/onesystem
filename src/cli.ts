@@ -42,11 +42,14 @@ import {
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
+import { backendStates, editConfig, setEnabled } from "./config-edit.ts"
+import { findModel, MODELS } from "./models.ts"
+import { configHint, detectGpu, install, listRuntimes, runtimeDir, runtimesRoot, uninstall, verify } from "./install.ts"
 import { logger } from "./log.ts"
 
 const log = logger("cli")
 
-const USAGE = `usage: onesystem <serve|start|stop|status|config-path>`
+const USAGE = `usage: onesystem <serve|start|stop|status|config-path|install|uninstall|use|runtimes|doctor>`
 
 function parseArgs(argv: string[]): { command: string } {
   return { command: argv[0] ?? "status" }
@@ -182,11 +185,162 @@ async function cmdConfigPath(): Promise<number> {
   return 0
 }
 
+/**
+ * Install a model into a Python environment onesystem owns.
+ *
+ * Not wired into the plugin's own setup. Installing 6 GB of torch is not something a
+ * session should trigger as a side effect of opening a terminal, and a failed install
+ * that leaves a half-configured backend is worse than no backend. The plugin will *use*
+ * an installed model; a person installs one.
+ */
+async function cmdInstall(args: string[]): Promise<number> {
+  const [name, ...rest] = args
+  if (!name) {
+    process.stderr.write(`usage: onesystem install <model>\nmodels: ${MODELS.map((m) => m.name).join(", ")}\n`)
+    return 2
+  }
+  const spec = findModel(name)
+  const lockOnly = rest.includes("--lock-only")
+  try {
+    const runtime = await install(spec, { lockOnly, onProgress: (m) => log.info(m) })
+    if (lockOnly) {
+      log.info("resolved only; nothing downloaded", { model: name })
+      return 0
+    }
+    const gpu = await detectGpu()
+    const check = await verify(runtime.dir, gpu)
+    process.stdout.write(`installed ${name}\n  interpreter: ${runtime.python}\n`)
+    if (spec.interpreterEnv) {
+      process.stdout.write(`\nadd to your config so the backend uses it:\n${configHint(spec, runtime)}\n`)
+      process.stdout.write(
+        `\n${spec.interpreterEnv} must be set in the config, not the shell: the daemon inherits\n` +
+          `nothing from the session that started it.\n`,
+      )
+    }
+    return check.ok ? 0 : 1
+  } catch (err) {
+    process.stderr.write(`install failed: ${describeError(err)}\n`)
+    return 1
+  }
+}
+
+async function cmdRuntimes(): Promise<number> {
+  const found = await listRuntimes()
+  if (found.length === 0) {
+    process.stdout.write(`no runtimes installed (looked in ${runtimesRoot()})\n`)
+    return 0
+  }
+  for (const r of found) {
+    const state = r.installed ? "ok" : "INCOMPLETE (no meta.json — safe to delete)"
+    process.stdout.write(`${r.name.padEnd(10)} ${state.padEnd(34)} ${r.python}\n`)
+  }
+  return 0
+}
+
+async function cmdUninstall(args: string[]): Promise<number> {
+  const [name] = args
+  if (!name) {
+    process.stderr.write("usage: onesystem uninstall <model>\n")
+    return 2
+  }
+  const removed = await uninstall(name)
+  process.stdout.write(removed ? `removed ${name}\n` : `${name} was not installed\n`)
+  return 0
+}
+
+/**
+ * Check an installed runtime against the GPU it would run on.
+ *
+ * The command that turns a silent failure loud. Every way this goes wrong — CUDA torch
+ * on AMD, a venv built for the wrong interpreter, an arch torch was not built for —
+ * produces a runtime that imports cleanly and then runs on the CPU, or does not, and
+ * neither is obvious until you time a call.
+ */
+async function cmdDoctor(args: string[]): Promise<number> {
+  const gpu = await detectGpu()
+  process.stdout.write(`gpu: ${gpu.vendor}${gpu.gfx ? ` (${gpu.gfx})` : ""}\n`)
+  const targets = args.length > 0 ? [args[0]!] : (await listRuntimes()).map((r) => r.name)
+  if (targets.length === 0) {
+    process.stdout.write("no runtimes to check\n")
+    return 0
+  }
+  let bad = 0
+  for (const name of targets) {
+    const check = await verify(runtimeDir(name), gpu)
+    if (check.ok) {
+      process.stdout.write(`${name}: ok${check.torch ? ` (torch hip ${check.torch})` : ""}\n`)
+    } else {
+      bad++
+      process.stdout.write(`${name}: FAILED\n`)
+      for (const p of check.problems) process.stdout.write(`  - ${p}\n`)
+    }
+  }
+  return bad === 0 ? 0 : 1
+}
+
+/**
+ * Switch which model is live.
+ *
+ * A flag, not a mechanism. The daemon supervises each backend independently and the tool
+ * surface namespaces itself per backend, so switching means turning one off and the other
+ * on — and `enabled` already exists. What this adds is that the edit preserves the file's
+ * comments and refuses to write over a concurrent change.
+ */
+async function cmdUse(args: string[]): Promise<number> {
+  const [name] = args
+  if (!name) {
+    process.stderr.write("usage: onesystem use <model>\n")
+    return 2
+  }
+  const { config, path } = await loadConfig()
+  const states = backendStates(config)
+  if (!states.some((s) => s.name === name)) {
+    process.stderr.write(
+      `no backend named "${name}" in ${path}; found: ${states.map((s) => s.name).join(", ") || "none"}\n`,
+    )
+    return 2
+  }
+
+  const next = states.map((s) => ({ name: s.name, enabled: s.name === name }))
+  try {
+    const result = await editConfig(path, (text) =>
+      next.reduce((acc, s) => setEnabled(acc, s.name, s.enabled), text),
+    )
+    if (!result.changed) {
+      process.stdout.write(`${name} is already the only enabled backend\n`)
+      return 0
+    }
+  } catch (err) {
+    process.stderr.write(`${describeError(err)}\n`)
+    return 1
+  }
+
+  for (const s of next) process.stdout.write(`${s.enabled ? "on " : "off"}  ${s.name}\n`)
+  process.stdout.write(`\n${path} updated. Run \`onesystem start\` to pick the change up.\n`)
+  return 0
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const { command } = parseArgs(argv)
 
   // Before config loading, so it still works with no config file present at all.
   if (command === "config-path") return cmdConfigPath()
+
+  // The model commands read no config either. `install` in particular must work when the
+  // config is what needs fixing, and `runtimes`/`doctor` are diagnostics you reach for
+  // precisely when something is wrong.
+  if (command === "install" || command === "uninstall" || command === "runtimes" || command === "doctor") {
+    switch (command) {
+      case "install":
+        return cmdInstall(argv.slice(1))
+      case "uninstall":
+        return cmdUninstall(argv.slice(1))
+      case "runtimes":
+        return cmdRuntimes()
+      default:
+        return cmdDoctor(argv.slice(1))
+    }
+  }
 
   let loaded: { config: Config; path: string }
   try {
@@ -198,6 +352,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const { config, path } = loaded
 
   switch (command) {
+    case "use":
+      return cmdUse(argv.slice(1))
     case "serve":
       await cmdServe(config)
       return 0
