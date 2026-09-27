@@ -44,6 +44,23 @@ export interface ModelSpec {
    * So the package files are fetched on their own and installed from a local path.
    */
   readonly source?: { readonly repo: string; readonly allow: readonly string[] }
+  /**
+   * The runtime needs the MCP SDK in it.
+   *
+   * True for a model that ships a library rather than a server. The shim that exposes
+   * it runs on this model's own interpreter, so the dependency goes in this venv and
+   * not in a requirements file next to the shim, which nothing would install.
+   */
+  readonly needsMcp?: boolean
+  /**
+   * Weights that have to exist as a local directory before the model will load.
+   *
+   * A checkpoint, not code: 550 MB for Julia-1, fetched once and kept outside the runtime
+   * so a reinstall does not take it with it. Fetched by the installer rather than left to
+   * the model because a model that loads from a local path and has nothing there fails at
+   * the first call, long after the install reported success.
+   */
+  readonly weights?: { readonly repo: string; readonly envVar: string }
 }
 
 export const MODELS: readonly ModelSpec[] = [
@@ -57,9 +74,16 @@ export const MODELS: readonly ModelSpec[] = [
     name: "julia",
     // The distribution name is not the model name; the repo's pyproject says
     // `supersonic-julia`, and a source whose metadata name disagrees is refused.
+    //
+    // `mcp` is here, not in the shim's requirements, because the shim runs *inside* this
+    // runtime. laya ships its own MCP server; the julia package is a library with the
+    // same predict contract and none, so the server is ours and its dependency belongs
+    // with the interpreter that has to import it.
     requirement: "supersonic-julia==0.1.0",
     requiresPython: ">=3.11,<3.15",
     source: { repo: "SupersonicLabs/Julia-1", allow: ["julia/**", "pyproject.toml", "README.md"] },
+    needsMcp: true,
+    weights: { repo: "SupersonicLabs/Julia-1", envVar: "JULIA_CHECKPOINT" },
   },
 ]
 

@@ -43,6 +43,33 @@
       "toolPrefix": "laya_"
     },
 
+    // A second model, as a peer of laya rather than a replacement: same predict(state,
+    // questions) contract, 0.66 GB of VRAM against laya's 3.01, and a 6s load against
+    // 20-54s. It needs its own venv because it pins transformers<5.1.
+    //
+    // The command is its runtime's interpreter running the shim in this repo, rather than
+    // a shim in a dotfile: onesystem owns the thing it spawns. `onesystem install julia`
+    // prints the exact block for your machine.
+    "julia": {
+      "transport": "stdio-mcp",
+      "command": [
+        "/home/micah/.local/share/onesystem/runtimes/julia/.venv/bin/python",
+        "/home/micah/Projects/onesystem/src/shims/julia-mcp.py"
+      ],
+      "env": {
+        "JULIA_DEVICE": "cuda",
+        // Weights, not code. Fetched once by the installer and kept outside the runtime,
+        // because a reinstall replaces the runtime and would otherwise take them with it.
+        "JULIA_CHECKPOINT": "/home/micah/.local/share/onesystem/weights/julia",
+        "JULIA_IDLE_UNLOAD_SECS": "300",
+        "JULIA_TOOL_TIMEOUT_SECS": "120"
+      },
+      "startupTimeoutSecs": 120,
+      // No toolPrefix: the shim names its tool `predict`, which is what opencode should
+      // see. A prefix is only for stripping a name a model puts on its own tools.
+      "enabled": false
+    },
+
     "rev": {
       "transport": "systemone-http",
       // Already-running service speaking POST /v1/systemone. onesystem does not
