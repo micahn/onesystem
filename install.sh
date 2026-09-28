@@ -68,20 +68,36 @@ die() {
 
 REPLY=""
 
-# Sets REPLY to a model name, or empty for none.
-ask_model() {
+# Add to SELECTED unless already there.
+select_model() {
+  [[ " ${SELECTED[*]} " == *" $1 "* ]] || SELECTED+=("$1")
+}
+
+# Turn an answer into SELECTED: "1, 2", "1 2", "laya julia", "a", "n". Unknown words warn.
+parse_models() {
+  SELECTED=()
+  local input="${1,,}" token
+  for token in ${input//,/ }; do
+    case "$token" in
+      1 | laya)  select_model laya ;;
+      2 | julia) select_model julia ;;
+      a | all)   select_model laya; select_model julia ;;
+      "" | n | none) ;;
+      *) warn "ignoring \"$token\"" ;;
+    esac
+  done
+}
+
+# Sets SELECTED to a model list. No terminal means none.
+ask_models() {
   if [[ ! -t 0 ]]; then
     note "No terminal to ask on, so no model."
     return 0
   fi
-  note "  1) laya   2) julia   3) none"
-  printf '  %s? model [3]: ' "$YELLOW"
+  note "  1) laya   2) julia   a) all   n) none"
+  printf '  %s? models, e.g. "1 2" or "a" [n]: ' "$YELLOW"
   read -r REPLY || REPLY=""
-  case "${REPLY:-3}" in
-    1) REPLY="laya" ;;
-    2) REPLY="julia" ;;
-    *) REPLY="" ;;
-  esac
+  parse_models "$REPLY"
 }
 
 finish() {
@@ -102,8 +118,7 @@ TOTAL_STAGES=7
 REPO_URL="https://github.com/micahn/onesystem.git"
 # Keep this path stable: plugin registration uses an absolute path.
 INSTALL_DIR="${ONESYSTEM_DIR:-$HOME/.local/share/onesystem/repo}"
-# Empty means ask, and "none" means do not install one. No default model: the plugin works
-# without one, and a several-GB download is not a thing to do unasked.
+# Empty means ask. Takes the same answers as the prompt: laya, julia, "1 2", all, none.
 MODEL="${ONESYSTEM_MODEL:-}"
 CONFIG_DIR="${ONESYSTEM_CONFIG_DIR:-$HOME/.config/onesystem}"
 CONFIG="$CONFIG_DIR/onesystem.jsonc"
@@ -253,34 +268,45 @@ stage "Model"
 # The plugin registers and runs with no model at all, so this is a choice rather than a step.
 # The download is several GB, and doing it unasked is the installer's one real overreach.
 INSTALLED=$(bun run src/cli.ts runtimes 2>/dev/null | awk '$2 == "ok" { print $1 }' || true)
-CHOSEN="$MODEL"
 [[ -n "$INSTALLED" ]] && ok "already installed: $(tr '\n' ' ' <<<"$INSTALLED")"
 
-if [[ -z "$CHOSEN" || "$CHOSEN" == "none" ]]; then
-  if [[ -n "$INSTALLED" ]]; then
-    CHOSEN=""   # something is already there; do not ask what to add on top of it
-  else
-    ask_model
-    CHOSEN="$REPLY"
-  fi
+SELECTED=()
+if [[ -n "$MODEL" ]]; then
+  parse_models "$MODEL"
+elif [[ -z "$INSTALLED" ]]; then
+  ask_models
 fi
 
-if [[ -z "$CHOSEN" ]]; then
-  if [[ -n "$INSTALLED" ]]; then
-    note "nothing to do"
+# Already-present models are reported, not rebuilt.
+WANTED=()
+LAST=""
+for m in "${SELECTED[@]}"; do
+  if grep -qx "$m" <<<"$INSTALLED"; then
+    ok "$m is already installed"
   else
+    WANTED+=("$m")
+    LAST="$m"
+  fi
+done
+
+if (( ${#WANTED[@]} )); then
+  note "Downloads PyTorch and builds a runtime per model. Several GB each, several minutes."
+  for m in "${WANTED[@]}"; do
+    bun run src/cli.ts install "$m" || die "install $m failed"
+    ok "$m installed and configured"
+    DONE+=("model: $m")
+  done
+  # install enables what it installs and turns the rest off, so the last one wins.
+  note "enabled: $LAST  (onesystem use <model> to switch)"
+  INSTALLED="${WANTED[*]}"
+elif (( ! ${#SELECTED[@]} )); then
+  if [[ -z "$INSTALLED" ]]; then
     note "no model installed. The plugin registers; its tools stay absent until you do."
     SKIPPED+=("install a model: bun run src/cli.ts install laya")
     [[ -t 0 ]] || SKIPPED+=("or set ONESYSTEM_MODEL=laya before running the installer")
   fi
-elif grep -qx "$CHOSEN" <<<"$INSTALLED"; then
-  ok "$CHOSEN is already installed"
 else
-  note "Downloads PyTorch and builds a runtime. Several GB, several minutes."
-  bun run src/cli.ts install "$CHOSEN" || die "install $CHOSEN failed"
-  ok "$CHOSEN installed and configured"
-  DONE+=("model: $CHOSEN")
-  INSTALLED="$CHOSEN"
+  note "nothing to install"
 fi
 
 stage "opencode plugin"

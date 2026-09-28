@@ -14,10 +14,18 @@ curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh 
 ```
 
 The installer clones to `~/.local/share/onesystem/repo`, writes the config, and registers
-the plugin. It then asks whether to install a model runtime — a several-GB download — and
-defaults to no. Set `ONESYSTEM_MODEL=laya` or `julia` to skip the question, or
-`ONESYSTEM_MODEL=none` to make the skip explicit. You can run the installer again to update
-the checkout; it skips installed runtimes and asks before running `sudo`.
+the plugin. It then asks which model runtimes to install — a several-GB download each — and
+defaults to none:
+
+```
+  1) laya   2) julia   a) all   n) none
+  ? models, e.g. "1 2" or "a" [n]:
+```
+
+`ONESYSTEM_MODEL` takes the same answers (`laya`, `julia`, `1,2`, `all`, `none`) for when
+there is no terminal to ask on. Install both if you like; only one is enabled at a time,
+switchable with `onesystem use`. You can run the installer again to update the checkout; it
+skips installed runtimes and asks before running `sudo`.
 
 Restart OpenCode, then run `opencode plugin list` to check that `onesystem` loaded, and
 look for the status line to confirm the TUI half. Without a model the plugin registers but
@@ -141,10 +149,10 @@ Set these variables before running the curl command:
 
 | Variable | Default | Use |
 | --- | --- | --- |
-| `ONESYSTEM_MODEL` | asks | `laya` or `julia` to install that runtime, `none` to install no runtime. |
+| `ONESYSTEM_MODEL` | asks | Which runtimes to install: `laya`, `julia`, `1,2`, `all`, or `none`. |
 | `ONESYSTEM_DIR` | `~/.local/share/onesystem/repo` | Choose the checkout path for a curl install. |
 
-For example, `export ONESYSTEM_MODEL=julia`, then run the install command.
+For example, `export ONESYSTEM_MODEL=all`, then run the install command.
 Running `bash install.sh` from a checkout uses that checkout.
 
 ### Manual install
@@ -161,10 +169,10 @@ bun run src/cli.ts register-plugin
 ```
 
 That is the whole install. The plugin registers with no model; it has no tools until you
-install one:
+install one or more:
 
 ```sh
-bun run src/cli.ts install laya   # or julia
+bun run src/cli.ts install laya      # add julia the same way for both
 bun run src/cli.ts start
 bun run src/cli.ts status
 ```
