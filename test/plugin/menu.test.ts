@@ -17,6 +17,7 @@ import {
   normalizeSettings,
   parseNumeric,
   parsePollMs,
+  commandLayer,
   topMenu,
   type MenuValue,
 } from "../../src/plugin/menu.ts"
@@ -223,5 +224,55 @@ describe("what the menu writes", () => {
     } finally {
       delete process.env.ONESYSTEM_CONFIG_DIR
     }
+  })
+})
+
+describe("the /onesystem command", () => {
+  test("it is global, or prompt completion never offers it", () => {
+    // A keymap layer defaults to the `base` input mode. Prompt slash completion only
+    // offers commands reachable in the mode being typed in, so a default-mode layer is
+    // invisible in the prompt while working in the palette -- which reads as a plugin
+    // that is not installed. Both reference plugins on this machine set `global`.
+    const layer = commandLayer(() => {})()
+    expect(layer.mode).toBe("global")
+  })
+
+  test("it is reachable as a slash command and in the palette", () => {
+    const [command] = commandLayer(() => {})().commands
+    expect(command!.slash.name).toBe("onesystem")
+    expect(command!.slash.aliases).toContain("onesys")
+    expect(command!.palette).toBe(true)
+    // Stable, so a user can bind it in their keymap config.
+    expect(command!.id).toBe("onesystem.menu")
+  })
+
+  test("running it opens the menu", () => {
+    let opened = 0
+    commandLayer(() => opened++)().commands[0]!.run()
+    expect(opened).toBe(1)
+  })
+
+  test("it is registered from a slot that always renders, not the footer", async () => {
+    // `ctx.keymap.layer` throws outside a render, so it needs a claimed slot -- but a
+    // footer slot only renders once there is a footer, and the command has to exist
+    // before anyone can type it. `app` renders unconditionally.
+    const src = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+    const appSlot = src.indexOf('append: "app"')
+    expect(appSlot).toBeGreaterThan(-1)
+    // Matched with the paren so the explanatory comment, which names the same call, is
+    // not mistaken for it.
+    const call = "ctx.keymap.layer("
+    expect(src.indexOf(call)).toBeGreaterThan(appSlot)
+    // And created exactly once, in that slot: a second layer would shadow this one.
+    expect(src.split(call).length - 1).toBe(1)
+    // Not from setup() either, which throws "Keymap.Provider is missing".
+    expect(src.indexOf(call)).toBeGreaterThan(src.indexOf("const menu = async"))
+  })
+
+  test("the command is declared once, in menu.ts, and tui.ts adds no second one", async () => {
+    const tui = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+    // A duplicate `/onesystem` would shadow the first one, or show twice in completion.
+    expect(tui).not.toContain('slash: { name: "onesystem"')
+    expect(tui).not.toContain("onesystem.menu")
   })
 })

@@ -27,6 +27,7 @@ import {
   normalizeSettings,
   parseNumeric,
   parsePollMs,
+  commandLayer,
   topMenu,
   type MenuValue,
   type PluginSettings,
@@ -484,8 +485,15 @@ export default Plugin.define({
       }
     }
 
-    // keymap.layer needs a component owner; register once inside the slot render.
-    let registered = false
+    // `ctx.keymap.layer` is owned by the component it is called from and throws
+    // "Keymap.Provider is missing" outside a render, so it cannot be created in setup().
+    // A claimed slot is the only place it can go -- and this one is `app` rather than the
+    // footer below, because a footer slot only renders once there is a footer, while the
+    // slash command has to exist before anyone can type it.
+    const commands = ctx.ui.slot({
+      append: "app",
+      render: () => ctx.keymap.layer(commandLayer(menu)),
+    })
 
     // A slot cannot be removed after setup, so the card renders nothing when it is off.
     const card = ctx.ui.slot({
@@ -499,26 +507,7 @@ export default Plugin.define({
     const dispose = ctx.ui.slot({
       append: "prompt.footer.status",
       render: () => {
-        // Read the signal before keymap registration to keep it in the tracking scope.
         const { text, tone } = line()
-        if (!registered) {
-          registered = true
-          ctx.keymap.layer(() => ({
-            commands: [
-              {
-                id: "onesystem.menu",
-                title: "onesystem",
-                description: "model status, install and switch",
-                group: "onesystem",
-                slash: { name: "onesystem" },
-                palette: true,
-                run: () => {
-                  void menu()
-                },
-              },
-            ],
-          }))
-        }
         // Direct jsx() calls need getters to track reactive prop updates.
         return jsx("text", {
           get fg() {

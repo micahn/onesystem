@@ -43,6 +43,45 @@ export interface MenuOption {
   category?: string
 }
 
+/** The layer shape, declared here so it is testable without an OpenCode renderer. */
+export interface CommandLayer {
+  mode: "global"
+  commands: {
+    id: string
+    title: string
+    description: string
+    group: string
+    palette: true
+    slash: { name: string; aliases: string[] }
+    run: () => void
+  }[]
+}
+
+/**
+ * The keymap layer that makes `/onesystem` exist.
+ *
+ * `mode: "global"` is load-bearing. A layer defaults to the `base` input mode, and prompt
+ * slash completion only offers commands reachable in the mode you are typing in, so a
+ * default-mode layer is invisible in the prompt -- the command works in the palette and
+ * nowhere else, which reads as "the plugin is not installed".
+ */
+export function commandLayer(open: () => void): () => CommandLayer {
+  return () => ({
+    mode: "global",
+    commands: [
+      {
+        id: "onesystem.menu",
+        title: "onesystem",
+        description: "model status, install, enable and settings",
+        group: "onesystem",
+        palette: true,
+        slash: { name: "onesystem", aliases: ["onesys"] },
+        run: open,
+      },
+    ],
+  })
+}
+
 /**
  * One flat list with categories rather than nested dialogs: the whole thing is one
  * screen, and the categories are what make it readable.

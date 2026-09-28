@@ -87,7 +87,8 @@ you killing the daemon.
 
 ### From inside OpenCode
 
-`/onesystem` opens a menu, and is also in the command palette. One flat list, grouped:
+`/onesystem` (or `/onesys`) opens a menu, and is also in the command palette. One flat
+list, grouped:
 
 | | |
 | --- | --- |
