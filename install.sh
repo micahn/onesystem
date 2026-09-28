@@ -66,6 +66,21 @@ die() {
   exit 1
 }
 
+# Bring a checkout to date: pull what is there, clone when nothing is.
+bring_up_to_date() {
+  if [[ -d "$1/.git" ]]; then
+    step "updating $1"
+    git -C "$1" pull --ff-only || warn "could not pull; continuing with what is on disk"
+    ok "updated"
+  else
+    step "cloning into $1"
+    mkdir -p "$(dirname "$1")"
+    git clone --depth 1 "$REPO_URL" "$1" || die "clone failed"
+    OWNS_SOURCE=1
+    ok "cloned"
+  fi
+}
+
 REPLY=""
 
 # Add to SELECTED unless already there.
@@ -220,28 +235,29 @@ fi
 
 stage "Source"
 
-# Use the script's checkout, or clone when piped from curl.
 SELF_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 fi
 
-if [[ -n "$SELF_DIR" && -f "$SELF_DIR/src/cli.ts" ]]; then
+# ONESYSTEM_DIR is a decision and the checkout is a default, so the variable wins.
+# Both paths are printed, because stage 6 registers one of them in opencode for good.
+if [[ -n "${ONESYSTEM_DIR:-}" ]]; then
+  ok "using ONESYSTEM_DIR: $INSTALL_DIR"
+  bring_up_to_date "$INSTALL_DIR"
+elif [[ -n "$SELF_DIR" && -f "$SELF_DIR/src/cli.ts" ]]; then
   INSTALL_DIR="$SELF_DIR"
   ok "using this checkout: $INSTALL_DIR"
-  note "  curl installs use ONESYSTEM_DIR to choose the checkout path"
-elif [[ -d "$INSTALL_DIR/.git" ]]; then
-  step "updating $INSTALL_DIR"
-  git -C "$INSTALL_DIR" pull --ff-only || warn "could not pull; continuing with what is on disk"
-  ok "updated"
+  note "  ONESYSTEM_DIR overrides this"
 else
-  step "cloning into $INSTALL_DIR"
-  mkdir -p "$(dirname "$INSTALL_DIR")"
-  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" || die "clone failed"
-  OWNS_SOURCE=1
-  ok "cloned"
+  bring_up_to_date "$INSTALL_DIR"
 fi
 DONE+=("source: $INSTALL_DIR")
+
+# opencode keeps this path after the run, so a checkout that gets swept away breaks it.
+case "$INSTALL_DIR" in
+  /tmp/* | /var/tmp/*) warn "under a temp directory: opencode will keep pointing at $INSTALL_DIR" ;;
+esac
 
 cd "$INSTALL_DIR"
 
