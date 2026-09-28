@@ -89,7 +89,7 @@ function classify(cmd: string, args: string[]): Step {
 }
 
 interface Plan {
-  gpu?: "amd" | "nvidia" | "unknown"
+  gpu?: "amd" | "nvidia" | "intel" | "unknown"
   uv?: "ok" | "absent"
   lock?: "ok" | "fail" | "hang"
   sync?: "ok" | "fail" | "hang"
@@ -129,6 +129,13 @@ function scripted(plan: Plan = {}): { runner: Runner; steps: Step[]; cwds: (stri
         // Corporation]" -- and the detection reads that, so the fixture has to as well. A
         // friendlier fake string here would test a machine that does not exist.
         if (plan.gpu === "nvidia") return ok({ stdout: "01:00.0 VGA: NVIDIA Corporation Device 2684 [NVIDIA Corporation]" })
+        if (plan.gpu === "intel") {
+          // The regression case, and the reason it is a real lspci line rather than a
+          // made-up one: "Corporation" contains "ati", so the unanchored `/AMD|ATI/i` this
+          // replaced read this as an AMD card. The script would then have answered
+          // `rocm-smi` happily and the install would have gone through.
+          return ok({ stdout: "00:02.0 VGA: Intel Corporation Device 9bc4 [Intel Corporation]" })
+        }
         if (plan.gpu === "unknown") return ok({ stdout: "00:02.0 VGA: Virtio GPU 1af4 [Device 1af4]" })
         return ok({
           stdout: "0c:00.0 VGA: Advanced Micro Devices, Inc. Device 0x744c [AMD/ATI] (rev c1)",
@@ -428,6 +435,24 @@ describe("refusing to guess the hardware", () => {
     // a 40x slowdown, so detection fails closed.
     const { runner } = scripted({ gpu: "unknown" })
     await expect(install(findModel("laya"), { runner })).rejects.toThrow(/refusing to install/)
+    await assertNothingPublished("laya")
+  })
+
+  test("an Intel card is refused, not read as AMD", async () => {
+    // A machine with an Intel iGPU and no AMD card. `lspci` says
+    // "Intel Corporation", and "Corporation" contains "ati" — so the unanchored
+    // `/AMD|ATI/i` this replaced classified it as AMD, asked for `rocm-smi`, and the script
+    // (like a machine that happened to have ROCm's tools installed) would have said yes and
+    // produced an install against a card that is not there.
+    //
+    // It is the one detection bug found during this work that was not self-limiting, and it
+    // was found by writing a fixture for a machine that is not this one. Asserted through
+    // `install` because that is where the decision is visible.
+    const { runner, steps } = scripted({ gpu: "intel" })
+    await expect(install(findModel("laya"), { runner })).rejects.toThrow(/refusing to install/)
+    // And it never got as far as asking about ROCm, which is the tell: the old code reached
+    // `rocm-smi` on a machine that has no AMD GPU.
+    expect(steps).not.toContain("rocm-smi")
     await assertNothingPublished("laya")
   })
 })

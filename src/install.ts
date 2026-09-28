@@ -162,10 +162,23 @@ export async function detectGpu(runner: Runner): Promise<Gpu> {
   const vendorLine = lspci?.stdout ?? ""
 
   if (/NVIDIA/i.test(vendorLine)) return { vendor: "nvidia" }
-  if (!/AMD|ATI/i.test(vendorLine)) {
+  // Word-bounded, and the boundaries are the entire fix.
+  //
+  // `lspci` prints the vendor in a bracket tag — "[AMD/ATI]", "[NVIDIA Corporation]",
+  // "[Intel Corporation]" — so the token is there to be matched. Unanchored, `/AMD|ATI/i`
+  // also matched "Intel Corpor*ati*on", so a machine with an Intel iGPU was read as AMD and
+  // sent on to demand `rocm-smi` and a gfx target that a machine without an AMD card does
+  // not have. It still failed closed, so no wrong install was ever possible: the cost was
+  // a refusal that named the wrong vendor on the way there, which is a poor way to tell
+  // someone their lspci is fine and their card is not supported.
+  //
+  // The NVIDIA test above is left unanchored on purpose, because no other vendor's name
+  // contains "NVIDIA" as a substring. It is not evidence that anchoring does not matter.
+  if (!/\b(?:AMD|ATI)\b/i.test(vendorLine)) {
     throw new Error(
       "could not identify the GPU vendor from lspci; refusing to install rather than " +
-        "guessing a wheel index. On AMD, make sure lspci is installed and the card is visible.",
+        "guessing a wheel index. onesystem supports AMD (ROCm) and NVIDIA (CUDA); " +
+        "anything else is refused. On AMD, make sure lspci is installed and the card is visible.",
     )
   }
 
