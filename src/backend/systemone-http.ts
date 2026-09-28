@@ -130,6 +130,10 @@ export class SystemOneBackendImpl implements Backend {
 
   async #forward(ctx: CallContext, body: unknown): Promise<unknown> {
     const url = `${this.spec.baseUrl}/v1/systemone`
+    // Same shape as the local adapter's, and for the same reason: `validate` always
+    // populates `startupTimeoutSecs`, so the `30` is a last-resort default for a hand-built
+    // spec rather than a value the shipped config can ever produce. `ctx.timeoutMs` is the
+    // caller's budget and wins over both.
     const timeoutMs = ctx.timeoutMs ?? (this.spec.startupTimeoutSecs ?? 30) * 1000
     const doFetch = this.deps.fetch ?? ((input, init) => fetch(input, init))
     const body_text = JSON.stringify(body ?? {})

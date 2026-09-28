@@ -21,7 +21,13 @@
   // How often the idle check runs. A timestamp compare, so this can be cheap.
   "idleSweepSecs": 5,
 
-  // Ceiling on one forwarded MCP call. Matches LAYA_TOOL_TIMEOUT_SECS in the shim.
+  // Ceiling on one forwarded MCP call, enforced by the daemon.
+  //
+  // This line used to claim it matched the laya shim's tool-timeout variable, which
+  // described a relationship that did not exist: the shim reads that variable and does
+  // something with it, and the daemon reads this one and enforces the cap. Two numbers
+  // that happen to both be 120 is not a match, and a comment claiming it is one invites
+  // someone to change one and not the other. This is the number that does the work.
   "requestTimeoutSecs": 120,
 
   // Which model answers when the agent has not said. Off unless enabled, and ignored
@@ -93,7 +99,12 @@
         "LAYA_PRELOAD": "0",
         "LAYA_IDLE_UNLOAD_SECS": "300",
         "LAYA_TOOL_TIMEOUT_SECS": "120",
-        "LAYA_PYTHON": "/path/to/onesystem/runtimes/laya/.venv/bin/python"
+        // `onesystem install laya` prints the exact path for your machine. The default
+        // root is `~/.local/share/onesystem` (or `$ONESYSTEM_DATA_DIR`), so a hand-written
+        // one looks like the line below. It is NOT `<repo>/runtimes/...`: the installer
+        // never writes there, and a config pointing at it spawns a process that does not
+        // exist -- which the daemon reports as a backend that failed to start.
+        "LAYA_PYTHON": "/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/python"
       },
       "startupTimeoutSecs": 180,
 
@@ -114,16 +125,14 @@
     "julia": {
       "transport": "stdio-mcp",
       "command": [
-        "/path/to/onesystem/runtimes/julia/.venv/bin/python",
+        "/home/you/.local/share/onesystem/runtimes/julia/.venv/bin/python",
         "/path/to/onesystem/src/shims/julia-mcp.py"
       ],
       "env": {
         "JULIA_DEVICE": "cuda",
         // Weights, not code. Fetched once by the installer and kept outside the runtime,
         // because a reinstall replaces the runtime and would otherwise take them with it.
-        "JULIA_CHECKPOINT": "/path/to/onesystem/weights/julia",
-        "JULIA_IDLE_UNLOAD_SECS": "300",
-        "JULIA_TOOL_TIMEOUT_SECS": "120"
+        "JULIA_CHECKPOINT": "/home/you/.local/share/onesystem/weights/julia"
       },
       "startupTimeoutSecs": 120,
       // No toolPrefix: the shim names its tool `predict`, which is what opencode should

@@ -5,19 +5,34 @@ laya ships its own MCP server; the `julia` package is a library with the same
 predict(state, questions) contract and no server, so this is the adapter that
 puts it behind the same tool surface onesystem already speaks.
 
-Deliberately thin. Everything worth sharing -- the typed question contract, the
-idle window, the per-call timeout -- already exists on the daemon side, so this
-only has to translate one tool call into one library call.
+Deliberately thin: one tool call in, one library call out.
+
+## Where the idle window and the per-call timeout are
+
+Both of them are the daemon's, and this file implements neither.
+
+    idle window    src/supervisor.ts -- a backend is quiesced once it is local,
+                   warm, idle past ``idleShutdownSecs``, and not in flight
+    per-call cap   the supervisor layers the config's ``requestTimeoutSecs`` over
+                   the forward, as a backstop on the adapter's own signal
+
+This file used to read ``JULIA_IDLE_UNLOAD_SECS`` and ``JULIA_TOOL_TIMEOUT_SECS``,
+and carried an ``Engine.reap_if_idle`` that nothing in the file ever called next to
+a ``TOOL_TIMEOUT_SECS`` that nothing in the file ever read. All three were dead, and
+all three were worse than absent: a maintainer debugging a hung call opens the shim
+because the shim is where the model lives, finds the constant, and finds it unused.
+The shipped config set both of those variables as well, which made three places
+assert that a child enforces a per-call cap that no child enforces.
+
+They are gone. If you are adding a cap, add it to the config and read it in the
+daemon; if you are adding an unload, ``quiesce`` is the hook and the supervisor
+calls it.
 """
-import json
 import os
 import sys
-import time
 import traceback
 
 CHECKPOINT = os.environ.get("JULIA_CHECKPOINT", "")
-IDLE_UNLOAD_SECS = int(os.environ.get("JULIA_IDLE_UNLOAD_SECS", "300"))
-TOOL_TIMEOUT_SECS = int(os.environ.get("JULIA_TOOL_TIMEOUT_SECS", "120"))
 
 
 def _device():
@@ -27,28 +42,24 @@ def _device():
 
 
 class Engine:
-    """Lazily loaded, with an idle unload.
+    """Lazily loaded, and nothing more.
 
     Loading costs ~6s and ~0.7 GB, so a session that never calls a tool should not
-    pay for it, and a session that stops calling should give it back.
+    pay for it. That laziness is the whole of this class. The *release* is the
+    daemon's: it quiesces the process rather than reaching in here to drop a
+    reference, so an in-process unload would have been a second and quieter version
+    of a policy the supervisor already owns.
     """
 
     def __init__(self):
         self._model = None
-        self._last_used = 0.0
 
     def get(self):
         if self._model is None:
             from julia import load_model
 
             self._model = load_model(CHECKPOINT, device=_device())
-        self._last_used = time.time()
         return self._model
-
-    def reap_if_idle(self):
-        if self._model is not None and time.time() - self._last_used > IDLE_UNLOAD_SECS:
-            self._model = None
-            print(f"[onesystem:julia] idle {IDLE_UNLOAD_SECS}s, unloaded", file=sys.stderr, flush=True)
 
 
 ENGINE = Engine()

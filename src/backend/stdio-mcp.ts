@@ -149,6 +149,12 @@ export class StdioMcpBackend implements Backend {
   }
 
   async #doStart(generation: number): Promise<void> {
+    // The `180` is unreachable for any config that came through `validate`, which always
+    // populates `startupTimeoutSecs`; it exists only for a hand-built spec, which is what
+    // the lifecycle tests build. So the number that decides anything is the config's, and
+    // this is a last-resort default for a caller that skipped validation. It is written
+    // out rather than shared because there is no constant for it, and a shared constant
+    // would be the better answer if there were ever a second reader.
     const timeoutMs = (this.spec.startupTimeoutSecs ?? 180) * 1000
     const started = this.#now()
     log.info("spawning", { command: this.spec.command[0], timeoutMs })
