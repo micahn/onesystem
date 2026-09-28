@@ -12,6 +12,9 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import type { Config } from "./config.ts"
 
@@ -134,6 +137,83 @@ export async function editConfig(
  */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+/**
+ * Add this repo's plugin to an opencode config, and report whether it had to.
+ *
+ * Not onesystem's own config, so `validate` does not apply and the caller owns the shape.
+ * What is shared is the mechanism: `modify` splices one entry into a JSONC file a person
+ * hand-edits, and every comment and every unrelated key survives. That is the whole reason
+ * this is code and not a `sed` in the install script. `opencode.json` is full of comments,
+ * and an install that rewrote it through `JSON.parse` would delete all of them along with
+ * every key it did not know about.
+ *
+ * Idempotent, because the install script is re-runnable and a second entry for the same
+ * path makes opencode load the plugin twice.
+ */
+export function registerPlugin(
+  text: string,
+  pluginPath: string,
+): { text: string; added: boolean; alreadyThere: boolean } {
+  // Checked before the parse, not after. An absent or empty file is a config opencode has
+  // not written yet, and `parse("")` reports `ValueExpected at offset 0` -- so testing the
+  // errors first turned "no file yet" into a refusal to install, on the one machine where
+  // there is genuinely nothing to preserve.
+  if (text.trim() === "") {
+    const seeded = `{\n  "plugins": [{ "package": ${JSON.stringify(pluginPath)} }]\n}\n`
+    return { text: seeded, added: true, alreadyThere: false }
+  }
+
+  const errors: ParseError[] = []
+  const doc = parse(text, errors) as Record<string, unknown> | undefined
+  if (errors.length > 0) {
+    const first = errors[0]!
+    throw new Error(`not valid JSONC at offset ${first.offset}: ${printParseErrorCode(first.error)}`)
+  }
+  // A file that parses to nothing usable, e.g. only a comment. Same situation as empty:
+  // there is nothing to anchor a `modify` to, so it becomes a fresh document.
+  if (doc === undefined || Object.keys(doc).length === 0) {
+    const seeded = `{\n  "plugins": [{ "package": ${JSON.stringify(pluginPath)} }]\n}\n`
+    return { text: seeded, added: true, alreadyThere: false }
+  }
+
+  const existing = doc.plugins
+  if (existing !== undefined && !Array.isArray(existing)) {
+    throw new Error(
+      `"plugins" is present but is not an array (${typeof existing}). Leaving it alone; ` +
+        `add {"package": ${JSON.stringify(pluginPath)}} to it by hand.`,
+    )
+  }
+  const list = (existing ?? []) as unknown[]
+  // Compared resolved, because `package` is a directory and a person may have written it
+  // with a trailing slash. That is what makes "already registered" true for the entry that
+  // is actually on disk rather than for a byte-identical string.
+  const target = resolve(pluginPath)
+  const alreadyThere = list.some(
+    (e) => isPlainObject(e) && typeof e.package === "string" && resolve(e.package) === target,
+  )
+  if (alreadyThere) return { text, added: false, alreadyThere: true }
+
+  const next = [...list, { package: pluginPath }]
+  return {
+    text: applyEdits(
+      text,
+      modify(text, ["plugins"], next, { formattingOptions: { insertSpaces: true, tabSize: 2 } }),
+    ),
+    added: true,
+    alreadyThere: false,
+  }
+}
+
+/** The directory opencode loads this plugin from. */
+export function pluginDir(): string {
+  return fileURLToPath(new URL("../src/plugin", import.meta.url))
+}
+
+/** Where opencode keeps its config. `OPENCODE_CONFIG` overrides, for a test or a second home. */
+export function opencodeConfigPath(): string {
+  return process.env.OPENCODE_CONFIG ?? join(homedir(), ".config", "opencode", "opencode.json")
 }
 
 export async function writeBackend(

@@ -26,8 +26,8 @@
 
 import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
-import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import { loadConfig, type Config } from "./config.ts"
 import { configCandidates, configDir, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
@@ -35,7 +35,13 @@ import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
-import { switchToBackend, writeBackend } from "./config-edit.ts"
+import {
+  opencodeConfigPath,
+  pluginDir,
+  registerPlugin,
+  switchToBackend,
+  writeBackend,
+} from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
 import {
   backendFor,
@@ -54,7 +60,7 @@ import { run } from "./subprocess.ts"
 
 const log = logger("cli")
 
-const USAGE = `usage: onesystem <serve|start|stop|status|config-path|install|uninstall|use|runtimes|doctor>`
+const USAGE = `usage: onesystem <serve|start|stop|status|config-path|install|uninstall|use|runtimes|register-plugin|doctor>`
 
 function parseArgs(argv: string[]): { command: string } {
   return { command: argv[0] ?? "status" }
@@ -361,6 +367,61 @@ async function cmdUse(args: string[]): Promise<number> {
   return 0
 }
 
+/**
+ * Add this plugin to opencode's config.
+ *
+ * The one install step a shell script cannot do safely on its own. `opencode.json` is
+ * hand-edited JSONC with comments in it, and appending an entry to a `plugins` array from
+ * bash means either `sed` on a file whose layout nobody controls, or a `JSON.parse` round
+ * trip that deletes every comment and every key it did not expect. The edit goes through
+ * `jsonc-parser`, the same machinery the rest of this project uses on its own config.
+ *
+ * Refuses rather than guesses. An existing `plugins` value that is not an array is somebody
+ * else's deliberate shape, and the failure is loud either way.
+ */
+async function cmdRegisterPlugin(): Promise<number> {
+  const path = opencodeConfigPath()
+  const dir = pluginDir()
+
+  let before: string
+  try {
+    before = await readFile(path, "utf8")
+  } catch {
+    before = ""
+  }
+
+  let result: ReturnType<typeof registerPlugin>
+  try {
+    result = registerPlugin(before, dir)
+  } catch (err) {
+    process.stderr.write(`could not edit ${path}: ${describeError(err)}\n`)
+    return 1
+  }
+
+  if (result.alreadyThere) {
+    process.stdout.write(`already registered in ${path}\n  ${dir}\n`)
+    return 0
+  }
+
+  // The same refuse-don't-clobber rule as `editConfig`: re-read before writing, because a
+  // person may have edited the file since we read it.
+  try {
+    const current = await readFile(path, "utf8").catch(() => "")
+    if (current !== before) {
+      process.stderr.write(`${path} changed while this was running; not writing over it. Re-run.\n`)
+      return 1
+    }
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, result.text)
+  } catch (err) {
+    process.stderr.write(`could not write ${path}: ${describeError(err)}\n`)
+    return 1
+  }
+
+  process.stdout.write(`registered in ${path}\n  ${dir}\n`)
+  return 0
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const { command } = parseArgs(argv)
 
@@ -370,7 +431,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   // The model commands read no config either. `install` in particular must work when the
   // config is what needs fixing, and `runtimes`/`doctor` are diagnostics you reach for
   // precisely when something is wrong.
-  if (command === "install" || command === "uninstall" || command === "runtimes" || command === "doctor") {
+  if (
+    command === "install" ||
+    command === "uninstall" ||
+    command === "runtimes" ||
+    command === "register-plugin" ||
+    command === "doctor"
+  ) {
     switch (command) {
       case "install":
         return cmdInstall(argv.slice(1))
@@ -378,6 +445,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         return cmdUninstall(argv.slice(1))
       case "runtimes":
         return cmdRuntimes()
+      case "register-plugin":
+        return cmdRegisterPlugin()
       default:
         return cmdDoctor(argv.slice(1))
     }

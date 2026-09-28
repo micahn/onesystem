@@ -60,8 +60,22 @@ working, not a bug.
 
 ## Install
 
-Written as a clean-room run on a machine with nothing installed. Every command below was
-executed in that order on an AMD card; the numbers in **Measured** come from it.
+One command, if your machine already has the prerequisites below:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
+```
+
+It clones to `~/.local/share/onesystem/repo`, builds the model, writes your config, and
+registers the opencode plugin. Safe to re-run: every step checks before it acts, nothing is
+overwritten without asking, and the only thing it will not do unprompted is run `sudo`. Set
+`ONESYSTEM_MODEL=julia` for the other model, or `ONESYSTEM_DIR=/path` to put the checkout
+somewhere else — the plugin is registered by absolute path, so that path has to stay put.
+
+Restart opencode afterwards. Plugins load at server start, so a session that is already open
+will not see the tools.
+
+The steps below are what that script does, in case you would rather run them yourself.
 
 ### 0. Prerequisites
 
@@ -140,8 +154,11 @@ Note that enabling one model disables the others, and the command tells you whic
 
 ### 4. Register the plugin
 
-In `~/.config/opencode/opencode.json`, add the plugin and **remove any old per-session
-`laya` MCP entry**:
+```sh
+bun run src/cli.ts register-plugin
+```
+
+That adds the entry to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
@@ -149,6 +166,11 @@ In `~/.config/opencode/opencode.json`, add the plugin and **remove any old per-s
   "mcp": { "servers": { /* delete a "laya-mcp" local entry if you have one */ } }
 }
 ```
+
+It goes through `jsonc-parser` rather than `sed`, because `opencode.json` is hand-edited
+JSONC: a text rewrite of a file whose layout nobody controls is how an install eats somebody's
+config, and a `JSON.parse` round trip would delete every comment in it. It is idempotent, so
+running it twice does not load the plugin twice.
 
 `package` must be the **directory**, not the `index.ts` file. Pointing it at the file fails
 with `configured plugin path must be a directory` in
@@ -367,7 +389,7 @@ hold session start open.
 ## Tests
 
 ```sh
-bun test              # 304 unit and integration tests
+bun test              # 312 unit and integration tests
 ./test/e2e-laya.sh    # end to end against the real laya backend
 ```
 
@@ -415,8 +437,9 @@ dominated by `import transformers` rather than by inference.
 ## Layout
 
 ```
+install.sh            the one-command installer; the steps below are what it does
 src/
-  cli.ts                serve | start | stop | status | install | use | doctor
+  cli.ts                serve | start | stop | status | install | use | register-plugin | doctor
   daemon.ts             lock + bind + supervise + wind down
   lock.ts               single-instance guard
   http.ts               MCP Streamable HTTP front
@@ -427,7 +450,7 @@ src/
   routing.ts            which model answers when the agent has not said
   naming.ts             what a backend and its tools are called
   models.ts             the models onesystem knows how to install
-  install.ts            installing a model: a Python environment onesystem owns
+
   paths.ts              where things live on disk
   subprocess.ts         the project's one subprocess seam
   async.ts              deadlines and error description, shared by everything that waits
