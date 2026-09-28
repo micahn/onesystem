@@ -8,10 +8,10 @@
  * reimplement any of that, it just supervises the process.
  *
  * The reason the start is slow is worth stating, because it looks like a hang and gets
- * diagnosed as one. `laya-mcp-idle-server` imports `laya.router`, which pulls in
- * transformers, measured here at 25-30s, and it does that before it binds stdio. So the
- * child is silent for ~30s after spawn. `startupTimeoutSecs` defaults to 180 because of
- * that silence, not because the work is slow.
+ * diagnosed as one. laya's server imports `laya.router`, which pulls in transformers,
+ * measured here at 25-30s, and it does that before it binds stdio. So the child is silent
+ * for ~30s after spawn. `startupTimeoutSecs` defaults to 180 because of that silence, not
+ * because the work is slow.
  *
  * ## The stop/start race
  *

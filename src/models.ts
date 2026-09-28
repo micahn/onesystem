@@ -74,6 +74,10 @@ export interface ModelSpec {
   /**
    * A sentence about the `command` a person still has to fill in, for models that ship
    * their own server rather than a library onesystem runs a shim beside.
+   *
+   * Only for models with no `entryPoint`: those are the ones where onesystem cannot work
+   * out the command, so it has to say which binary to point at rather than leave a
+   * plausible-looking path that fails on the first call.
    */
   readonly commandNote?: string
   /**
@@ -108,8 +112,12 @@ export const MODELS: readonly ModelSpec[] = [
     // Measured on this machine: the venv's own server publishes exactly the eight tools
     // above, answers on the GPU, and needs no shim to find the ROCm interpreter, because
     // its shebang is the venv's python.
+    //
+    // A shim used to sit between onesystem and laya, adding an idle-unload watchdog and a
+    // per-call timeout. Both are the daemon's job now -- it quiesces a backend by closing
+    // the process, which releases every checkpoint, and it layers `requestTimeoutSecs` over
+    // the forward. The shim was a workaround for a daemon that did not exist yet.
     entryPoint: "laya-mcp-server",
-    commandNote: "the laya MCP server binary, e.g. laya-mcp-idle-server on your PATH",
   },
   {
     name: "julia",

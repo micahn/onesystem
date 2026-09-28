@@ -132,6 +132,10 @@ export async function editConfig(
  * `merge: false` is available because `rev` and a hand-written `laya` block are worth
  * keeping as they are, and this should not be the thing that makes that impossible.
  */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
 export async function writeBackend(
   path: string,
   name: string,
@@ -156,6 +160,17 @@ export async function writeBackend(
     let next: Record<string, unknown>
     if (merge && existing && typeof existing === "object") {
       next = { ...existing, ...(backend as Record<string, unknown>) }
+      // `env` merges key by key rather than being replaced with the new block. It is a bag
+      // of settings and the installer only knows the two or three it has to set, so
+      // replacing it wholesale drops whatever a person put there: `LAYA_PRELOAD: "0"` is
+      // load-bearing, because it is what keeps the model from loading outside a request.
+      //
+      // `tools` deliberately does not merge. The model is authoritative about its own
+      // surface, and a union of two lists advertises names one of them has dropped.
+      const incoming = (backend as Record<string, unknown>).env
+      if (isPlainObject(existing.env) && isPlainObject(incoming)) {
+        next.env = { ...existing.env, ...incoming }
+      }
     } else {
       next = { ...(backend as Record<string, unknown>) }
     }

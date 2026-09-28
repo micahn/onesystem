@@ -81,15 +81,23 @@ describe("the shipped config", () => {
     expect(env).not.toContain("JULIA_TOOL_TIMEOUT_SECS")
   })
 
-  test("the laya backend's variables are the shim's own business, and are left alone", async () => {
-    // laya's idle window and tool timeout are real: its shim implements both. So this is a
-    // deliberate non-assertion rather than an oversight -- the point of the ticket was dead
-    // code in *julia's* shim, and "make them all the same" would have been the wrong fix.
-    // What is pinned is that the julia shim's removal did not quietly become a change to
-    // laya's variables.
+  test("laya's env carries only settings laya itself reads", async () => {
+    // `LAYA_IDLE_UNLOAD_SECS` and `LAYA_TOOL_TIMEOUT_SECS` used to be here, for a shim that
+    // implemented an idle-unload watchdog and a per-call timeout. Both are the daemon's job
+    // now: it quiesces a backend by closing the process, which releases every checkpoint,
+    // and it layers `requestTimeoutSecs` over the forward. The variables are gone from the
+    // template because the thing that read them no longer runs.
+    //
+    // What is pinned now is the general rule: every variable the template sets must be one
+    // laya's own server reads. A variable nothing reads asserts a relationship that does
+    // not exist, which is the same failure this file was written for.
     const env = (await configuredEnv()).laya ?? []
-    expect(env).toContain("LAYA_IDLE_UNLOAD_SECS")
-    expect(env).toContain("LAYA_TOOL_TIMEOUT_SECS")
+    expect(env).not.toContain("LAYA_IDLE_UNLOAD_SECS")
+    expect(env).not.toContain("LAYA_TOOL_TIMEOUT_SECS")
+    // The two that are load-bearing: the device, and lazy loading. `LAYA_PRELOAD: "0"` is
+    // what keeps the checkpoint out of VRAM until a request asks for it.
+    expect(env).toContain("LAYA_DEVICE")
+    expect(env).toContain("LAYA_PRELOAD")
   })
 
   test("a runtime path points at where the installer actually writes", async () => {

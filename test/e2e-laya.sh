@@ -22,7 +22,7 @@ owned_laya() {
   local dpid
   dpid=$(curl -s --max-time 2 "${URL}/health" 2>/dev/null | sed 's/\\//g' | grep -oP '"pid":\s*\K[0-9]+' | head -1)
   [ -z "$dpid" ] && { echo 0; return; }
-  pgrep -P "$dpid" -f laya-mcp-idle-server 2>/dev/null | wc -l
+  pgrep -P "$dpid" -f laya-mcp-server 2>/dev/null | wc -l
 }
 
 # Always start from a known state. A previous run that died mid-way leaves a daemon
@@ -46,7 +46,7 @@ flat() { sed 's/\\//g'; }
 
 echo "=== baseline ==="
 V0=$(vram)
-echo "VRAM $(mb "$V0")   ambient laya procs $(pgrep -f laya-mcp-idle-server | wc -l)"
+echo "VRAM $(mb "$V0")   ambient laya procs $(pgrep -f laya-mcp-server | wc -l)"
 
 echo
 echo "=== onesystem start (must NOT load a model) ==="

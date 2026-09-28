@@ -1,7 +1,7 @@
 /**
  * An MCP server that takes its time before binding stdio.
  *
- * This models the real thing, which is why it exists. `laya-mcp-idle-server` imports
+ * This models the real thing, which is why it exists. `laya's server imports
  * transformers and does that *before* it binds stdio, so a cold connect is silent for
  * 25-30s. Any shutdown that lands inside that window used to be lost: the adapter's
  * `stop()` read the client field, which is only assigned once `connect()` resolves, so it

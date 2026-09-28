@@ -158,3 +158,64 @@ describe("writing an installed backend into the config", () => {
     expect(await readFile(path, "utf8")).toBe(broken)
   })
 })
+
+describe("merging a backend into one that already exists", () => {
+  test("env is merged key by key, not replaced", async () => {
+    // The bug this caught. An install knows `LAYA_PYTHON` and nothing else, so replacing
+    // `env` wholesale dropped the two settings a person had put there to make the model
+    // behave: `LAYA_DEVICE` and `LAYA_PRELOAD`. The second is load-bearing -- it is what
+    // stops the model loading outside a request, which is the whole laziness contract.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-write-"))
+    const path = join(dir, "onesystem.jsonc")
+    await writeFile(
+      path,
+      `{
+  "backends": {
+    "laya": {
+      "transport": "stdio-mcp",
+      "command": ["/my/shim"],
+      "env": { "LAYA_DEVICE": "cuda", "LAYA_PRELOAD": "0", "LAYA_IDLE_UNLOAD_SECS": "300" },
+      "toolPrefix": "laya_",
+      "tools": ["predict"]
+    }
+  }
+}
+`,
+    )
+    await writeBackend(path, "laya", {
+      transport: "stdio-mcp",
+      command: ["/data/bin/laya-mcp-server"],
+      env: { LAYA_PYTHON: "/data/.venv/bin/python" },
+      tools: ["predict", "status"],
+    })
+
+    const env = (await read(path)).backends.laya.env
+    // The installer's value lands.
+    expect(env.LAYA_PYTHON).toBe("/data/.venv/bin/python")
+    // The person's values survive.
+    expect(env.LAYA_DEVICE).toBe("cuda")
+    expect(env.LAYA_PRELOAD).toBe("0")
+    expect(env.LAYA_IDLE_UNLOAD_SECS).toBe("300")
+    // And the command did change, which is the point of running an install.
+    expect((await read(path)).backends.laya.command).toEqual(["/data/bin/laya-mcp-server"])
+  })
+
+  test("tools is replaced, because the model is authoritative about its own surface", async () => {
+    // env merges; tools must not. A union would advertise a name the model has dropped,
+    // and that name fails at the moment of the call rather than at startup.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-write-"))
+    const path = join(dir, "onesystem.jsonc")
+    await writeFile(
+      path,
+      `{ "backends": { "laya": { "transport": "stdio-mcp", "command": ["/x"],
+        "tools": ["predict", "gone_in_this_release"] } } }
+`,
+    )
+    await writeBackend(path, "laya", {
+      transport: "stdio-mcp",
+      command: ["/y"],
+      tools: ["predict"],
+    })
+    expect((await read(path)).backends.laya.tools).toEqual(["predict"])
+  })
+})

@@ -231,8 +231,17 @@ async function cmdInstall(args: string[]): Promise<number> {
       try {
         const { config, path } = await loadConfig()
         await writeBackend(path, name, backend, { enabled: true })
-        await switchToBackend(path, config, name)
+        const switched = await switchToBackend(path, config, name)
         process.stdout.write(`\nconfigured ${path}\n  enabled: ${name}\n`)
+        // Enabling a model makes it the only enabled one, so say which backend that took
+        // off. This used to be silent, and the effect is that installing a second model
+        // quietly stops the first one answering -- a change nobody sees until a tool goes
+        // missing from the session.
+        for (const other of switched.off) {
+          if (other !== name) {
+            process.stdout.write(`  turned off: ${other} (onesystem use ${other} to switch back)\n`)
+          }
+        }
         if (needsManualCommand(backend)) {
           process.stdout.write(
             `\nONE THING LEFT: the \`command\` above is a placeholder, because ${name} ships a\n` +

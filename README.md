@@ -60,44 +60,117 @@ working, not a bug.
 
 ## Install
 
-Requires opencode **V2**, [bun](https://bun.sh), and [uv](https://docs.astral.sh/uv/). uv is
-only needed for `onesystem install`; bun runs everything else.
+Written as a clean-room run on a machine with nothing installed. Every command below was
+executed in that order on an AMD card; the numbers in **Measured** come from it.
 
-> **V2 only.** onesystem is a V2 plugin, and V1 has no plugin API, so on V1 the tools never
-> appear and nothing explains why. Check with `opencode --version`. If your `opencode` is
-> managed by mise and reports 1.x, install V2 alongside it and make sure the V2 binary is the
-> one first on `PATH` — installing V2 does not displace a mise-managed V1. The daemon and the
-> CLI work fine under V1; only the plugin registration does not, so `onesystem start` and
-> `onesystem status` are still useful for checking an install.
+### 0. Prerequisites
+
+**opencode V2.** onesystem is a V2 plugin and V1 has no plugin API, so on V1 the tools never
+appear and nothing explains why. Check with `opencode --version`. If yours is mise-managed
+and reports 1.x, install V2 alongside it and put the V2 binary first on `PATH` — installing
+V2 does not displace a mise-managed V1. The daemon and the CLI work fine under V1, so
+`onesystem start` and `onesystem status` are still useful for checking an install when the
+plugin cannot load.
 
 ```sh
+mise use -g bun uv          # or: curl -fsSL https://bun.sh/install | bash
+```
+
+**ROCm, on an AMD card.** `onesystem install` reads the GPU vendor from `lspci` and the gfx
+target from `rocm-smi`, and refuses rather than guessing, so it will not start without both.
+Neither is part of a stock desktop install:
+
+```sh
+sudo pacman -S pciutils rocm-core      # Arch, and therefore Omarchy
+```
+
+`rocm-smi` lands in `/opt/rocm/bin`, which must be on your `PATH`. On Omarchy that is
+already true. Elsewhere: `export PATH=/opt/rocm/bin:$PATH`.
+
+To confirm before installing anything:
+
+```sh
+rocm-smi --showproductname    # must print a GFX Version
+```
+
+If that command is missing, stop here. On an NVIDIA card skip this section entirely:
+`onesystem install` takes the CUDA path and needs no ROCm.
+
+### 1. Clone and install
+
+```sh
+git clone https://github.com/micahn/onesystem.git
+cd onesystem
 bun install
+```
+
+### 2. Config
+
+```sh
 mkdir -p ~/.config/onesystem
 cp onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
 ```
 
-That config is a **template, not a working file.** Every path in it is a placeholder
-(`/path/to/...`, `/home/you/...`), because the real ones depend on your interpreter and your
-weights directory and cannot be written down in a repository. The installer is what fills
-them in, and it writes the result into your config for you:
+That file is a **template, not a working config.** Every path in it is a placeholder,
+because the real ones depend on your interpreter and your weights directory and cannot be
+written down in a repository. Step 3 fills them in.
+
+### 3. Install the model
 
 ```sh
-onesystem install laya
+bun run src/cli.ts install laya
 ```
 
-That builds the runtime, points the config at it, and enables it. There is nothing to copy
-and nothing to paste. Pass `--no-config` if you would rather see the block than have it
-written, and `onesystem use <model>` afterwards switches between models you have installed.
+This builds a Python environment onesystem owns, verifies it can see your GPU, points the
+config at it, and enables it. There is nothing to copy and nothing to paste. It takes a few
+minutes the first time, most of it downloading ROCm torch.
 
-Skipping the install is the most likely way to fail on a first run. A placeholder `command`
-path does not fail loudly at start: the daemon accepts the connection and answers, then
-returns an error payload on the first `tools/call`, and `onesystem status` reports the
-backend as failed to start with the placeholder in the message. Nothing is wrong except the
-path.
+```
+installed laya
+  interpreter: /home/you/.local/share/onesystem/runtimes/laya/.venv/bin/python
 
-`onesystem install` needs a GPU it can identify. It reads the vendor from `lspci` and the
-gfx target from `rocm-smi`, and refuses rather than guessing, so an unsupported or
-undetectable card stops the install instead of quietly producing a CPU-only runtime.
+configured /home/you/.config/onesystem/onesystem.jsonc
+  enabled: laya
+
+Run `onesystem start` and make a tool call. Nothing else to do.
+```
+
+`--no-config` prints the block instead of writing it. A second model is `install julia`.
+Note that enabling one model disables the others, and the command tells you which.
+
+### 4. Register the plugin
+
+In `~/.config/opencode/opencode.json`, add the plugin and **remove any old per-session
+`laya` MCP entry**:
+
+```jsonc
+{
+  "plugins": [{ "package": "/absolute/path/to/onesystem/src/plugin" }],
+  "mcp": { "servers": { /* delete a "laya-mcp" local entry if you have one */ } }
+}
+```
+
+`package` must be the **directory**, not the `index.ts` file. Pointing it at the file fails
+with `configured plugin path must be a directory` in
+`~/.local/share/opencode/log/opencode.log`, and the session ends up with no `laya` tools and
+no other symptom.
+
+**Restart opencode after this change.** Plugins load at server startup; editing the config
+reconnects MCP servers but does not load a newly added plugin. Until you restart, the
+session has no `laya` tools at all.
+
+### 5. Check it
+
+```sh
+bun run src/cli.ts start
+bun run src/cli.ts status
+```
+
+`status` loads nothing, so it is safe to run before the first tool call. The backends should
+read `cold`. The first tool call pays a 10-14 s cold load; a warm one is tens of ms.
+
+There is no `onesystem` on `PATH` in a fresh checkout. The plugin finds the CLI from its own
+location, so that works; use `bun run src/cli.ts <command>` as above.
 
 Then in `~/.config/opencode/opencode.json`, register the plugin and **remove** the old
 per-session stdio entry:
@@ -174,7 +247,7 @@ product prefix. This is the one place a model's surface is written down by hand:
 ```jsonc
 "laya": {
   "transport": "stdio-mcp",
-  "command": ["/path/to/bin/laya-mcp-idle-server"],
+  "command": ["/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/laya-mcp-server"],
   "toolPrefix": "laya_",
   "tools": ["predict", "status", "route", "decide"]
 }
@@ -218,17 +291,21 @@ This is `laya`.
 ```jsonc
 "laya": {
   "transport": "stdio-mcp",
-  "command": ["/path/to/bin/laya-mcp-idle-server"],
-  "env": { "LAYA_DEVICE": "cuda", "LAYA_PYTHON": "/path/to/venv/bin/python" },
+  "command": ["/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/laya-mcp-server"],
+  "env": { "LAYA_DEVICE": "cuda", "LAYA_PRELOAD": "0", "LAYA_PYTHON": "/path/to/venv/bin/python" },
   "startupTimeoutSecs": 180
 }
 ```
 
-> **`LAYA_PYTHON` is not optional.** The shim reads it from its own environment, and it
-> is not inherited from your shell — it only exists inside opencode's MCP config. Omit
-> it and the shim falls back to the mise interpreter, cannot import laya, and dies on
-> startup. Because the daemon keeps answering, that failure shows up as error payloads
-> rather than a dead service, so it is worth setting explicitly.
+`onesystem install laya` writes that block for you. Two of those values are load-bearing:
+
+> **`LAYA_PRELOAD: "0"`** makes laya load a checkpoint on first use rather than at startup.
+> Without it a model sits in VRAM from the moment the process starts, which is the whole
+> thing lazy start exists to avoid.
+
+> **`LAYA_PYTHON`** goes in the config, not your shell, because the daemon inherits nothing
+> from the session that started it. The venv's own `laya-mcp-server` finds its interpreter
+> from its shebang, so this only matters for a backend whose `command` is not that binary.
 
 **`systemone-http`** — an already-running service speaking `POST /v1/systemone`, the spec
 behind TypeSafe's `typesafe-sdk` and implemented by `rev`. onesystem does not start these.
@@ -290,16 +367,14 @@ hold session start open.
 ## Tests
 
 ```sh
-bun test              # 302 unit and integration tests
+bun test              # 304 unit and integration tests
 ./test/e2e-laya.sh    # end to end against the real laya backend
 ```
 
 `bun test` is self-contained: the backend tests run against fake MCP processes in
 `test/fixtures/`, so they need no GPU and no model. `e2e-laya.sh` is the opposite. It wants
-a real AMD or NVIDIA card, a `laya` runtime from `onesystem install laya`, and the laya MCP
-shim on `PATH` under the name `laya-mcp-idle-server`, which is not part of this repository.
-It also stops and starts the daemon on port 7331, so do not run it against a session you are
-using.
+a real AMD or NVIDIA card and a `laya` runtime from `onesystem install laya`. It also stops
+and starts the daemon on port 7331, so do not run it against a session you are using.
 
 The tests worth knowing about:
 
@@ -320,14 +395,22 @@ The tests worth knowing about:
 
 ## Measured
 
-On this machine (AMD GPU, ROCm 6.4, `laya` 0.3.21):
+On this machine (AMD RX 9070 XT, gfx1201, ROCm 6.4 driver with the ROCm 7.2 torch wheel,
+`laya` 0.3.21). Taken from the clean-room install above, not from an already-warm setup.
 
 | | |
 | --- | --- |
-| `onesystem start` → healthy | ~190 ms, no model |
-| First `tools/call` (cold) | ~10-14 s |
-| Warm `tools/call` | ~32 ms |
-| VRAM per loaded checkpoint | ~3 GB |
+| `onesystem install laya`, cold uv cache | several minutes, mostly ROCm torch |
+| `onesystem install laya`, warm uv cache | ~10 s |
+| `onesystem install julia` incl. 585 MB of weights | ~46 s |
+| `onesystem start` → healthy, no model loaded | ~190 ms |
+| First `tools/call` (cold, includes the load) | laya ~13.7 s, julia ~15.7 s |
+| Warm `tools/call` | tens of ms |
+| VRAM, both models resident | 6.6 GB |
+| `onesystem install laya --lock-only` | resolves and downloads nothing |
+
+The cold figure is the one to expect on the first tool call of a session, and it is
+dominated by `import transformers` rather than by inference.
 
 ## Layout
 
