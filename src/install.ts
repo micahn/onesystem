@@ -53,12 +53,13 @@
  * that: on this machine it resolved `torch==2.14.0+cpu`, silently, with exit code 0.
  */
 
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, open, readFile, readdir, rename, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { DEFAULT_TIMEOUT_MS, type Runner } from "./subprocess.ts"
 import type { ModelSpec } from "./models.ts"
+import type { StdioBackend } from "./backend/spec.ts"
 
 /**
  * The ROCm wheel index.
@@ -453,6 +454,10 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
     )
     await rename(staging, dir)
 
+    // The rename is what breaks every console script in the venv, so it is repaired here
+    // rather than discovered later.
+    await repairShebangs(dir, staging, pythonIn(dir))
+
     return { name: spec.name, dir, python: pythonIn(dir), installed: true }
   } catch (err) {
     await rm(staging, { recursive: true, force: true }).catch(() => {})
@@ -524,6 +529,67 @@ async function fetchWeights(
 
 export function pythonIn(dir: string): string {
   return join(dir, ".venv", "bin", "python")
+}
+
+/**
+ * Rewrite console-script shebangs that name the staging directory.
+ *
+ * `uv sync` bakes the absolute path of the environment it created into the shebang of every
+ * console script it installs, because a shebang has to name a real file and cannot be
+ * relative. This module builds in `<dir>.partial` and then renames it to `<dir>`, so every
+ * script in the published runtime came out pointing at a path that no longer exists:
+ *
+ *     #!/…/runtimes/laya.partial/.venv/bin/python
+ *
+ * Running one fails with `bad interpreter: No such file or directory`, which names a
+ * language runtime rather than the model, and the venv's own `python` still works, so
+ * `verify()` passed. It checked the interpreter and never the entry points beside it.
+ *
+ * The alternative is to make the staging path irrelevant, by pointing uv's
+ * `UV_PROJECT_ENVIRONMENT` at the final path while the project files stay in staging. That
+ * works, and it was rejected for a reason worth keeping: it creates the venv in the
+ * published directory *before* anything has been verified, so a failed install would leave a
+ * half-updated environment where a working one used to be. The staging-then-rename is the
+ * crash-safety argument for the whole module, and this is a cheaper way to keep it.
+ *
+ * Only shebangs naming the staging directory are touched. A script pointing anywhere else
+ * was not put there by this rename and rewriting it would be a guess.
+ */
+export async function repairShebangs(dir: string, staging: string, python: string): Promise<number> {
+  const bin = join(dir, ".venv", "bin")
+  let entries: string[]
+  try {
+    entries = await readdir(bin)
+  } catch {
+    return 0
+  }
+
+  let fixed = 0
+  for (const name of entries) {
+    const file = join(bin, name)
+    // Read a bounded prefix. A console script is a few hundred bytes; a stray binary in
+    // here is megabytes, and reading those to look at a shebang is how a repair pass turns
+    // into an out-of-memory error.
+    let handle: FileHandle | undefined
+    try {
+      handle = await open(file, "r")
+      const head = Buffer.alloc(512)
+      const { bytesRead } = await handle.read(head, 0, 512, 0)
+      const first = head.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0] ?? ""
+      if (!first.startsWith("#!") || !first.includes(staging)) continue
+
+      const body = await handle.readFile()
+      const rest = body.toString("utf8").split("\n").slice(1).join("\n")
+      await writeFile(file, `#!/usr/bin/env -S ${python.replace(/ /g, "\\ ")}\n${rest}`)
+      await chmod(file, 0o755)
+      fixed++
+    } catch {
+      // Not a readable regular file (a symlink to one, a socket). Nothing to repair.
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
+  return fixed
 }
 
 /**
@@ -627,47 +693,103 @@ export async function uninstall(name: string): Promise<boolean> {
  * That makes `ModelSpec.tools` a claim about the model that nothing can check, which is
  * the same trade the shipped config makes and for the same reason.
  */
-export function configHint(spec: ModelSpec, runtime: Runtime): string {
-  const env: string[] = []
-  if (spec.interpreterEnv) env.push(`"${spec.interpreterEnv}": "${runtime.python}"`)
-  if (spec.weights) {
-    env.push(`"${spec.weights!.envVar}": "${weightsDir(spec.name)}"`)
-  }
-
-  // A model with weights is a library, so the interpreter runs our shim beside it. A model
-  // that ships its own MCP server runs that binary, and onesystem has no way to learn its
-  // path -- so this is the one value a person still has to fill in.
-  //
-  // It is a quoted string rather than a bare `<...>` marker so the snippet still parses as
-  // JSON. The earlier form was unquoted, which meant the one output meant to be pasted into
-  // a config was not valid JSON, so a person who pasted it got a parse error instead of a
-  // config with one obvious gap in it.
-  const shimPath = `"/path/to/onesystem/src/shims/${spec.name}-mcp.py"`
-  const command = spec.weights
-    ? `[\n        "${runtime.python}",\n        ${shimPath}\n      ]`
-    : `["REPLACE: path to the ${spec.name} MCP server binary on your machine"]`
-
-  // `tools` is optional on the type but required for the hint to be pasteable: `validate`
-  // rejects an empty list, so a model that declares none would print `"tools": []` and fail
-  // on load. That is a gap in the model table, not something to paper over here, and saying
-  // so is more use than emitting a snippet that cannot load.
+/**
+ * The config block for an installed model, as an object.
+ *
+ * This is the source of truth for both the file `onesystem install` writes and the snippet
+ * it prints, so the two cannot describe different backends. It used to be a printed string
+ * only, which is why installing a model and using it were two steps with a copy between
+ * them, and why the copy was the one step that could go wrong in a way nothing detected.
+ *
+ * The `command` is resolved, not guessed, in this order:
+ *
+ *   1. the model's `entryPoint` inside the runtime this install just created
+ *   2. this repo's shim, for a model that ships a library and no server
+ *   3. a `REPLACE:` marker, because a wrong path is worse than an obvious gap
+ *
+ * Step 1 is what makes the install complete. laya's venv contains `laya-mcp-server`, and
+ * its shebang is the venv's own interpreter, so the venv is also the answer to "which
+ * python has the ROCm build" -- there is nothing left for a person to work out.
+ */
+export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<StdioBackend> {
+  // `tools` is optional on the type but required for a config to load: `validate` rejects
+  // an empty list, so a model declaring none would produce a block that cannot be used.
+  // That is a gap in the model table, not something to paper over here.
   if (!spec.tools || spec.tools.length === 0) {
     throw new Error(
       `cannot write a config block for ${spec.name}: it declares no tools, and they cannot be ` +
         `discovered without loading the model. Add \`tools\` to its ModelSpec in src/models.ts.`,
     )
   }
-  const tools = spec.tools.map((t) => JSON.stringify(t))
-  // The `env` block is assembled whole, with its own braces. It used to be spliced in as a
-  // bare list of `"NAME": "value"` lines after `command`, which produced a snippet with a
-  // dangling `LAYA_PYTHON` and no `"env":` key anywhere in it -- so the one line the CLI
-  // insists you set was the one line the hint printed uselessly.
-  const envBlock = env.length > 0 ? `\n    "env": {\n      ${env.join(",\n      ")}\n    },` : ""
-  const note = spec.commandNote ? `\n    // ${spec.commandNote}` : ""
-  return `  "${spec.name}": {
-    "transport": "stdio-mcp",${note}
-    "command": ${command},${envBlock}
-    // Declared, not discovered: reading these from the model is the model load.
-    "tools": [${tools.join(", ")}]
-  }`
+
+  const command = await resolveCommand(spec, runtime)
+  const env: Record<string, string> = {}
+  if (spec.interpreterEnv) env[spec.interpreterEnv] = runtime.python
+  if (spec.weights) env[spec.weights.envVar] = weightsDir(spec.name)
+
+  return {
+    transport: "stdio-mcp",
+    command,
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+    // Generous because laya's server is silent for ~30s importing transformers before it
+    // binds stdio. See stdio-mcp.ts.
+    startupTimeoutSecs: 180,
+    tools: [...spec.tools],
+  }
+}
+
+/** The three-step resolution described on `backendFor`. */
+async function resolveCommand(spec: ModelSpec, runtime: Runtime): Promise<string[]> {
+  if (spec.entryPoint) {
+    const bin = join(runtime.dir, ".venv", "bin", spec.entryPoint)
+    if (existsSync(bin)) return [bin]
+    // Fall through to the marker rather than returning a path that is not there. A
+    // `command` naming a missing file is the exact failure this project keeps trying to
+    // make loud, and it is louder as a REPLACE marker than as a plausible-looking path.
+  }
+  if (spec.weights) {
+    // A model that ships a library: the runtime's interpreter runs our shim beside it.
+    const shim = new URL(`./shims/${spec.name}-mcp.py`, import.meta.url).pathname
+    if (existsSync(shim)) return [runtime.python, shim]
+  }
+  return [`REPLACE: path to the ${spec.name} MCP server binary on your machine`]
+}
+
+/** True when `backendFor` produced something a person still has to fill in. */
+export function needsManualCommand(backend: StdioBackend): boolean {
+  return backend.command.some((arg) => arg.startsWith("REPLACE:"))
+}
+
+/**
+ * The same block as text, for printing.
+ *
+ * Printing is still the right answer in the two cases where writing is not available or not
+ * wanted: no config file to edit, and `--no-config`. It renders the object `backendFor`
+ * produced rather than assembling a second copy, because it used to assemble a second copy
+ * and the two drifted -- the printed one lost its `env` braces and its `tools` while the
+ * written one did not, which is a difference nobody would notice until a paste failed.
+ */
+export function renderBackend(name: string, backend: StdioBackend): string {
+  const lines = JSON.stringify(backend, null, 2).split("\n")
+  const inner = lines
+    .slice(1, -1)
+    .map((line) => `  ${line}`)
+    .join("\n")
+  return `  "${name}": {\n${inner}\n  }`
+}
+
+/** Print a backend built by `backendFor`. */
+export function configHint(spec: ModelSpec, runtime: Runtime, backend?: StdioBackend): string {
+  // `backend` is passed by `onesystem install` so the printed form is the resolved one,
+  // entry point and all. The fallback re-derives the marker form for the rare caller that
+  // only has a spec and a runtime.
+  if (backend) return renderBackend(spec.name, backend)
+  const marker: StdioBackend = {
+    transport: "stdio-mcp",
+    command: spec.weights
+      ? [runtime.python, `/path/to/onesystem/src/shims/${spec.name}-mcp.py`]
+      : [`REPLACE: path to the ${spec.name} MCP server binary on your machine`],
+    tools: [...(spec.tools ?? [])],
+  }
+  return renderBackend(spec.name, marker)
 }

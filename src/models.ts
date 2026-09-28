@@ -76,6 +76,15 @@ export interface ModelSpec {
    * their own server rather than a library onesystem runs a shim beside.
    */
   readonly commandNote?: string
+  /**
+   * The console script this model installs, looked for in the runtime's own `bin`.
+   *
+   * This is what removes the last manual step from `onesystem install`. laya ships
+   * `laya-mcp-server`, and that binary runs on the venv's interpreter -- so the venv *is*
+   * the interpreter selection, and the config needs no `LAYA_PYTHON` juggling to find the
+   * ROCm torch build. Naming the file is enough; onesystem knows where it put it.
+   */
+  readonly entryPoint?: string
 }
 
 export const MODELS: readonly ModelSpec[] = [
@@ -96,6 +105,10 @@ export const MODELS: readonly ModelSpec[] = [
       "predict_batch",
       "route_batch",
     ],
+    // Measured on this machine: the venv's own server publishes exactly the eight tools
+    // above, answers on the GPU, and needs no shim to find the ROCm interpreter, because
+    // its shebang is the venv's python.
+    entryPoint: "laya-mcp-server",
     commandNote: "the laya MCP server binary, e.g. laya-mcp-idle-server on your PATH",
   },
   {

@@ -111,3 +111,67 @@ export async function editConfig(
   await writeFile(path, after)
   return { changed: true, before, after }
 }
+
+/**
+ * Put an installed model into the config, so nobody has to paste anything.
+ *
+ * `onesystem install` used to print the block and stop. The README then told you to copy
+ * it, and the copy was the one step in the whole flow that could go wrong in a way nothing
+ * detected: a block missing a key still looks like a config, the daemon still starts, and
+ * the failure surfaces as an error payload on the first tool call rather than as a config
+ * error. Printing a snippet and calling that the last step is a manual step, and the
+ * machinery to do it properly was already here -- `modify` and `applyEdits` keep every
+ * comment, so the file stays hand-editable.
+ *
+ * The backend is replaced wholesale rather than merged field by field. A partial merge
+ * would have to decide what to do about a key the old block had and the new one does not,
+ * and the answer that is safe in general -- keep it -- is also the answer that leaves a
+ * stale `command` pointing at a deleted runtime. Replacing means the config always
+ * describes the runtime that is actually on disk.
+ *
+ * `merge: false` is available because `rev` and a hand-written `laya` block are worth
+ * keeping as they are, and this should not be the thing that makes that impossible.
+ */
+export async function writeBackend(
+  path: string,
+  name: string,
+  backend: unknown,
+  options: { enabled?: boolean; merge?: boolean } = {},
+): Promise<{ changed: boolean }> {
+  const { merge = true, enabled } = options
+  const result = await editConfig(path, (text) => {
+    const errors: ParseError[] = []
+    const doc = parse(text, errors) as Record<string, unknown> | undefined
+    if (errors.length > 0) {
+      const first = errors[0]!
+      throw new Error(
+        `config is not valid JSONC at offset ${first.offset}: ${printParseErrorCode(first.error)}`,
+      )
+    }
+    if (typeof doc !== "object" || doc === null) throw new Error("config is not a JSON object")
+
+    const backends = (doc.backends ?? {}) as Record<string, Record<string, unknown>>
+    const existing = backends[name]
+
+    let next: Record<string, unknown>
+    if (merge && existing && typeof existing === "object") {
+      next = { ...existing, ...(backend as Record<string, unknown>) }
+    } else {
+      next = { ...(backend as Record<string, unknown>) }
+    }
+    // `enabled` is the switch, not part of the model's shape, so it is applied last and
+    // survives a replacement of everything else.
+    if (enabled !== undefined) next.enabled = enabled
+    // Preserved from whatever was there: a replacement must not silently turn a model off
+    // just because the block that described it was rewritten.
+    else if (existing && "enabled" in existing) next.enabled = existing.enabled
+
+    return applyEdits(
+      text,
+      modify(text, ["backends", name], next, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      }),
+    )
+  })
+  return { changed: result.changed }
+}

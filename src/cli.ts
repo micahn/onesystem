@@ -35,9 +35,20 @@ import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
-import { switchToBackend } from "./config-edit.ts"
+import { switchToBackend, writeBackend } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
-import { configHint, detectGpu, install, listRuntimes, runtimeDir, runtimesRoot, uninstall, verify } from "./install.ts"
+import {
+  backendFor,
+  configHint,
+  detectGpu,
+  install,
+  listRuntimes,
+  needsManualCommand,
+  runtimeDir,
+  runtimesRoot,
+  uninstall,
+  verify,
+} from "./install.ts"
 import { logger } from "./log.ts"
 import { run } from "./subprocess.ts"
 
@@ -205,14 +216,42 @@ async function cmdInstall(args: string[]): Promise<number> {
     const gpu = await detectGpu(run)
     const check = await verify(runtime.dir, gpu, run)
     process.stdout.write(`installed ${name}\n  interpreter: ${runtime.python}\n`)
+
+    const backend = await backendFor(spec, runtime)
     // Not gated on `interpreterEnv`. That was the condition, and only laya has one, so
     // `onesystem install julia` said nothing about how to use what it had just built --
     // which is the only question someone has at that point.
-    process.stdout.write(`\nadd to your config so the backend uses it:\n${configHint(spec, runtime)}\n`)
+    if (rest.includes("--no-config")) {
+      process.stdout.write(`\nnot written to any config (--no-config). The block is:\n${configHint(spec, runtime, backend)}\n`)
+    } else {
+      // Installed *and* configured. The copy was the last manual step in the flow, and it
+      // was the one that could fail invisibly: a block missing a key still parses, the
+      // daemon still starts, and the mistake surfaces as an error payload on the first
+      // tool call rather than as a config error.
+      try {
+        const { config, path } = await loadConfig()
+        await writeBackend(path, name, backend, { enabled: true })
+        await switchToBackend(path, config, name)
+        process.stdout.write(`\nconfigured ${path}\n  enabled: ${name}\n`)
+        if (needsManualCommand(backend)) {
+          process.stdout.write(
+            `\nONE THING LEFT: the \`command\` above is a placeholder, because ${name} ships a\n` +
+              `server this installer cannot locate. Point it at the real binary in ${path}.\n`,
+          )
+        } else {
+          process.stdout.write(`\nRun \`onesystem start\` and make a tool call. Nothing else to do.\n`)
+        }
+      } catch (err) {
+        // The runtime is on disk and usable; only the config write failed. Saying so is
+        // the difference between "it half worked" and "it did nothing".
+        process.stdout.write(`\ninstalled, but the config was not updated: ${describeError(err)}\n`)
+        process.stdout.write(`\nIt is on disk and usable. Add this yourself:\n${configHint(spec, runtime, backend)}\n`)
+      }
+    }
     if (spec.interpreterEnv) {
       process.stdout.write(
-        `\n${spec.interpreterEnv} must be set in the config, not the shell: the daemon inherits\n` +
-          `nothing from the session that started it.\n`,
+        `\n${spec.interpreterEnv} goes in the config, not your shell: the daemon inherits nothing\n` +
+          `from the session that started it.\n`,
       )
     }
     return check.ok ? 0 : 1

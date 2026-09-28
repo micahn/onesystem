@@ -79,17 +79,21 @@ cp onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
 That config is a **template, not a working file.** Every path in it is a placeholder
 (`/path/to/...`, `/home/you/...`), because the real ones depend on your interpreter and your
 weights directory and cannot be written down in a repository. The installer is what fills
-them in:
+them in, and it writes the result into your config for you:
 
 ```sh
-onesystem install laya    # builds the runtime, then prints the exact block for your machine
-onesystem use laya        # and switches the config to it
+onesystem install laya
 ```
 
-Skipping this is the most likely way to fail on a first run. A placeholder `command` path
-does not fail loudly at start: the daemon accepts the connection and answers, then returns
-an error payload on the first `tools/call`, and `onesystem status` reports the backend as
-failed to start with the placeholder in the message. Nothing is wrong except the path.
+That builds the runtime, points the config at it, and enables it. There is nothing to copy
+and nothing to paste. Pass `--no-config` if you would rather see the block than have it
+written, and `onesystem use <model>` afterwards switches between models you have installed.
+
+Skipping the install is the most likely way to fail on a first run. A placeholder `command`
+path does not fail loudly at start: the daemon accepts the connection and answers, then
+returns an error payload on the first `tools/call`, and `onesystem status` reports the
+backend as failed to start with the placeholder in the message. Nothing is wrong except the
+path.
 
 `onesystem install` needs a GPU it can identify. It reads the vendor from `lspci` and the
 gfx target from `rocm-smi`, and refuses rather than guessing, so an unsupported or
@@ -286,7 +290,7 @@ hold session start open.
 ## Tests
 
 ```sh
-bun test              # 279 unit and integration tests
+bun test              # 302 unit and integration tests
 ./test/e2e-laya.sh    # end to end against the real laya backend
 ```
 

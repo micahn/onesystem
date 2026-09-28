@@ -8,8 +8,15 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { parse } from "jsonc-parser"
-import { assertNoAcceleratorMixups, configHint, pyprojectFor, ROCM_INDEX } from "../src/install.ts"
+
+import {
+  assertNoAcceleratorMixups,
+  backendFor,
+  configHint,
+  needsManualCommand,
+  pyprojectFor,
+  ROCM_INDEX,
+} from "../src/install.ts"
 import { validate } from "../src/config.ts"
 import { findModel, MODELS } from "../src/models.ts"
 
@@ -159,7 +166,7 @@ describe("the model table", () => {
   })
 })
 
-describe("the config hint", () => {
+describe("the config block an install produces", () => {
   const runtimeFor = (name: string) => ({
     name,
     dir: `/data/runtimes/${name}`,
@@ -168,82 +175,105 @@ describe("the config hint", () => {
   })
 
   /**
-   * Parse the hint the way a person would: paste it into a config and load that.
+   * Load the block the way the daemon will: as part of a real config, through the real
+   * validator.
    *
-   * The hint's whole job is to be pasteable, and it is printed by `onesystem install` as the
-   * answer to "how do I use this". It shipped without `tools`, which `validate` rejects, so
-   * the documented path produced a config that could not load and the error named a missing
-   * key rather than the install. Asserting the *string* would not have caught that; the
-   * failure was only visible by running the real validator.
+   * This used to assert on a printed string, which is how a block missing `tools` shipped:
+   * the string is a perfectly good string, and the failure only appeared when a person
+   * pasted it and the daemon refused the config. `onesystem install` writes this block
+   * itself now, so the question is whether the written thing loads.
    */
-  const asBackend = (name: string) => {
+  const loads = async (name: string) => {
     const spec = findModel(name)
-    const hint = configHint(spec, runtimeFor(name))
-    // The hint is a backend fragment, so wrap it in the minimum config that holds one.
-    const text = `{"port": 7331, "backends": {${hint}}}`
-    return { spec, hint, text, parsed: parse(text) as Record<string, unknown> }
+    const backend = await backendFor(spec, runtimeFor(name))
+    return { spec, backend, doc: { port: 7331, backends: { [name]: backend } } }
   }
 
-  test("it produces a backend the validator accepts, for every model", () => {
+  test("it produces a backend the validator accepts, for every model", async () => {
     for (const m of MODELS) {
-      const { spec, text, parsed } = asBackend(m.name)
+      const { spec, doc } = await loads(m.name)
       let rejected: string | null = null
       try {
-        validate(parsed, "hint.json")
+        validate(doc, "written.json")
       } catch (err) {
         rejected = err instanceof Error ? err.message : String(err)
       }
       expect(`${spec.name}: ${rejected ?? "accepted"}`).toBe(`${spec.name}: accepted`)
-      // Silence the unused-variable warning while keeping the text for the failure message.
-      expect(typeof text).toBe("string")
     }
   })
 
-  test("it never prints a placeholder command", () => {
-    // The one output whose entire purpose is to contain no placeholders used to print
+  test("it never emits a placeholder path", async () => {
+    // The one output whose entire purpose is to contain no placeholders used to emit
     // `["/path/to/shim"]` for a model with no local weights.
     for (const m of MODELS) {
-      expect(`${m.name}: ${configHint(m, runtimeFor(m.name))}`).not.toContain("/path/to/shim")
+      const { backend } = await loads(m.name)
+      expect(`${m.name}: ${JSON.stringify(backend.command)}`).not.toContain("/path/to/shim")
     }
   })
 
-  test("a model that ships its own server says which binary to point at", () => {
-    // laya runs a binary onesystem has no way to locate, so the hint has to name it rather
-    // than invent a path. This is the one field a person still fills in.
-    const { hint } = asBackend("laya")
-    expect(hint).toMatch(/laya-mcp-idle-server/)
+  test("a model whose entry point is missing says which binary to point at", async () => {
+    // laya's runtime in this test does not exist, so there is no `laya-mcp-server` to find.
+    // The fallback has to be an obvious gap rather than a plausible-looking path, because a
+    // `command` naming a missing file fails at the first tool call rather than at startup.
+    const { backend } = await loads("laya")
+    expect(needsManualCommand(backend)).toBe(true)
+    expect(backend.command[0]).toMatch(/^REPLACE: /)
+    expect(backend.command[0]).toContain("laya")
   })
 
-  test("a model that ships a library points at this repo's shim", () => {
+  test("a model that ships a library points at this repo's shim", async () => {
     // julia has no server of its own, so the command is fully determined and must not
     // leave a person guessing.
-    const { hint } = asBackend("julia")
-    expect(hint).toContain("/src/shims/julia-mcp.py")
-    expect(hint).toContain("/data/runtimes/julia/.venv/bin/python")
+    const { backend } = await loads("julia")
+    expect(backend.command[1]).toMatch(/shims[\\/]julia-mcp\.py$/)
+    expect(backend.command[0]).toBe("/data/runtimes/julia/.venv/bin/python")
+    expect(needsManualCommand(backend)).toBe(false)
   })
 
-  test("it declares the model's tool surface, because it cannot be discovered", () => {
+  test("it declares the model's tool surface, because it cannot be discovered", async () => {
     for (const m of MODELS) {
       expect(`${m.name}: ${JSON.stringify(m.tools)}`).not.toMatch(/: undefined/)
-      const { hint } = asBackend(m.name)
-      for (const tool of m.tools!) expect(hint).toContain(`"${tool}"`)
+      const { backend } = await loads(m.name)
+      expect(backend.tools).toEqual([...(m.tools ?? [])])
     }
   })
 
-  test("a model that declares no tools is refused rather than given an empty list", () => {
-    // `validate` rejects an empty `tools`, so emitting one would print a snippet that cannot
-    // load. The gap belongs in the model table, so the hint says so instead of hiding it.
-    const spec = { ...findModel("julia"), tools: [] }
-    expect(() => configHint(spec, runtimeFor("julia"))).toThrow(/declares no tools/)
-    const missing = { ...findModel("julia"), tools: undefined }
-    expect(() => configHint(missing, runtimeFor("julia"))).toThrow(/declares no tools/)
+  test("a model that declares no tools is refused rather than given an empty list", async () => {
+    // `validate` rejects an empty `tools`, so emitting one would write a config that cannot
+    // load. The gap belongs in the model table, so this says so instead of hiding it.
+    const runtime = runtimeFor("julia")
+    await expect(backendFor({ ...findModel("julia"), tools: [] }, runtime)).rejects.toThrow(
+      /declares no tools/,
+    )
+    await expect(
+      backendFor({ ...findModel("julia"), tools: undefined }, runtime),
+    ).rejects.toThrow(/declares no tools/)
   })
 
-  test("a weights env var points at the directory the installer actually writes", () => {
+  test("a weights env var points at the directory the installer actually writes", async () => {
     // Weights are fetched outside the runtime so a reinstall does not take them with it, so
     // the path here is the weights directory and not the runtime that sits next to it.
-    const { hint } = asBackend("julia")
-    expect(hint).toContain("JULIA_CHECKPOINT")
-    expect(hint).toMatch(/weights[\\/]julia/)
+    const { backend } = await loads("julia")
+    expect(backend.env?.JULIA_CHECKPOINT).toMatch(/weights[\\/]julia$/)
+  })
+
+  test("the printed block is the written block, rendered", async () => {
+    // Printing is still the fallback for `--no-config` and for a config file that will not
+    // parse. It used to assemble a second copy by hand and the two drifted: the printed one
+    // lost its `env` braces and its `tools` while the written one kept them, which is a
+    // difference nobody sees until a paste fails.
+    for (const m of MODELS) {
+      const { backend } = await loads(m.name)
+      const text = configHint(m, runtimeFor(m.name), backend)
+      const parsed = JSON.parse(text.replace(/^\s*"\w+":\s*/, ""))
+      expect(`${m.name}: ${JSON.stringify(parsed)}`).toBe(`${m.name}: ${JSON.stringify(backend)}`)
+    }
+  })
+
+  test("the printed block is valid JSON, so a paste cannot half-work", async () => {
+    const { backend } = await loads("laya")
+    const text = configHint(findModel("laya"), runtimeFor("laya"), backend)
+    // It shipped unquoted once, which meant the one output meant for pasting was not JSON.
+    expect(() => JSON.parse(text.replace(/^\s*"\w+":\s*/, ""))).not.toThrow()
   })
 })
