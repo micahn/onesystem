@@ -38,7 +38,7 @@ function testConfig(port: number, marker: string, idleShutdownSecs: number): Con
           transport: "stdio-mcp",
           command: [process.execPath, new URL("./fixtures/fake-mcp.ts", import.meta.url).pathname],
           env: { FAKE_MCP_MARKER: marker },
-          startupTimeoutSecs: 30,
+          startupTimeoutSecs: 20,
           tools: ["decide"],
         },
       },

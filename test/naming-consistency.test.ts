@@ -13,7 +13,7 @@ import { STUB_TOOLS } from "./fixtures/stub-daemon.ts"
 
 const config = (backends: Record<string, unknown>, routing?: unknown): Config =>
   validate(
-    { idleShutdownSecs: 600, idleSweepSecs: 5, requestTimeoutSecs: 120, backends, routing },
+    { idleShutdownSecs: 600, idleSweepSecs: 5, requestTimeoutSecs: 180, backends, routing },
     "test",
   )
 

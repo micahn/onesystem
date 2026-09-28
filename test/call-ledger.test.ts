@@ -203,7 +203,7 @@ describe("a real stdio backend, aborted mid-call", () => {
           // set to the floor rather than worked around.
           idleSweepSecs: 1,
           requestTimeoutSecs: 60,
-          backends: { fake: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["decide"] } },
+          backends: { fake: { transport: "stdio-mcp", command: ["/bin/true"], startupTimeoutSecs: 30, tools: ["decide"] } },
         },
         "test",
       ),

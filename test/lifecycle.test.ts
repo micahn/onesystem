@@ -51,7 +51,7 @@ function configFor(backends: Record<string, unknown>, extra: Record<string, unkn
 }
 
 function stdio(name: string): Record<string, unknown> {
-  return { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"] }
+  return { transport: "stdio-mcp", command: ["/bin/true"], startupTimeoutSecs: 0.1, tools: ["predict"] }
 }
 
 describe("the backend seam", () => {
@@ -69,7 +69,7 @@ describe("the backend seam", () => {
   test("the factory is the only place that switches on transport", async () => {
     // Both adapters are constructible, and the default factory routes between them. If
     // routing were decided per-call, this would need a case here for every transport.
-    const config = configFor({ a: stdio("a"), b: { transport: "systemone-http", baseUrl: "http://127.0.0.1:1" } })
+    const config = configFor({ a: stdio("a"), b: { transport: "systemone-http", baseUrl: "http://127.0.0.1:1", startupTimeoutSecs: 1 } })
     const supervisor = new Supervisor(config)
     expect(supervisor.names()).toEqual(["a", "b"])
     expect(supervisor.snapshot().backends.map((b) => b.transport)).toEqual(["stdio-mcp", "systemone-http"])
@@ -275,7 +275,7 @@ describe("the idle sweep", () => {
     // config. This used to be a transport switch repeated in four places.
     const remote = new FakeBackend({ transport: "systemone-http", local: false })
     remote.setState("warm", 60_000)
-    const supervisor = new Supervisor(configFor({ r: { transport: "systemone-http", baseUrl: "http://127.0.0.1:1" } }), {
+    const supervisor = new Supervisor(configFor({ r: { transport: "systemone-http", baseUrl: "http://127.0.0.1:1", startupTimeoutSecs: 1 } }), {
       createBackend: () => remote,
     })
 

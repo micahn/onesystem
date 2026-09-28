@@ -32,7 +32,7 @@ function prefixedConfig(port: number, marker: string, toolPrefix?: string): Conf
           command: [process.execPath, new URL("./fixtures/fake-mcp.ts", import.meta.url).pathname],
           env: { FAKE_MCP_MARKER: marker, FAKE_MCP_TOOL: "fake_decide" },
           toolPrefix,
-          startupTimeoutSecs: 30,
+          startupTimeoutSecs: 20,
           // The declared surface is bare; `toolPrefix` puts the wire name back, which is
           // what the catalog reports and what `/call` must carry.
           tools: ["decide"],

@@ -101,7 +101,15 @@ OpenCode sessions -> plugin -> shared HTTP daemon -> local MCP process -> GPU
   daemon exits. The plugin starts it again before the next tool call.
 - Closing one session leaves the shared daemon running for the others.
 
-Other clients can use MCP Streamable HTTP at `/mcp/<backend>`.
+Other clients can use MCP Streamable HTTP at `/mcp/<backend>`. The two endpoints name
+tools differently on purpose: `/catalog` and `/call` use the wire name (`laya_predict`),
+`/mcp/<backend>` lists the bare name (`predict`). Both accept either, so read from
+whichever and call the one you read.
+
+`/catalog` advertises a minimal per-model schema, enough to check a payload without
+paying a cold load. It is not the backend's authoritative schema — that needs an MCP
+`tools/list`, which starts the model. The two models differ: laya takes a structured
+`state`, julia takes a string.
 
 ## Configuration
 
@@ -118,7 +126,7 @@ Most of it is editable from inside OpenCode with the `/onesystem` menu.
 | `port` | `7331` | HTTP port. |
 | `idleShutdownSecs` | `600` | Stop an idle local backend after this many seconds. |
 | `idleSweepSecs` | `5` | Seconds between idle checks. Must not exceed the idle window. |
-| `requestTimeoutSecs` | `120` | Maximum seconds for a forwarded call. |
+| `requestTimeoutSecs` | `180` | Ceiling on one forwarded call, cold start included. A backend's `startupTimeoutSecs` above it is refused at load. |
 | `backends` | `{}` | Backend definitions. |
 
 ### Backends and tools
