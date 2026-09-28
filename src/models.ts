@@ -3,6 +3,15 @@
  * Each model gets its own Python environment.
  */
 
+/**
+ * What one tool takes, as JSON Schema. Deliberately not the backend's own schema:
+ * `/catalog` cannot ask for it without a cold load, and the backend stays authoritative.
+ */
+export interface ToolSchema {
+  readonly properties: { readonly [arg: string]: unknown }
+  readonly required?: readonly string[]
+}
+
 export interface ModelSpec {
   /** Directory name under the runtimes root, and the name used on the command line. */
   readonly name: string
@@ -35,6 +44,12 @@ export interface ModelSpec {
    */
   readonly tools?: readonly string[]
   /**
+   * Argument schemas keyed by bare tool name, for the tools worth describing. A client
+   * reads these from `/catalog` to reject a payload before starting the model. A tool
+   * with no entry is advertised as an open object, as every tool was before.
+   */
+  readonly toolSchemas?: { readonly [tool: string]: ToolSchema }
+  /**
    * Manual command guidance for a model without a known entryPoint.
    */
   readonly commandNote?: string
@@ -63,6 +78,17 @@ export const MODELS: readonly ModelSpec[] = [
     ],
     // Laya's own server uses the runtime interpreter; lifecycle policy stays in the daemon.
     entryPoint: "laya-mcp-server",
+    // predict takes a structured state. The other tools are left undescribed until
+    // someone has a payload to check against them.
+    toolSchemas: {
+      predict: {
+        properties: {
+          state: { type: ["string", "object", "array"] },
+          questions: { type: "object" },
+        },
+        required: ["state", "questions"],
+      },
+    },
   },
   {
     name: "julia",
@@ -75,8 +101,24 @@ export const MODELS: readonly ModelSpec[] = [
     // julia ships a library and no server, so the shim in this repo is the surface, and it
     // publishes exactly one tool.
     tools: ["predict"],
+    // `state: string` is the shim's declared type and is not widened here: the two models
+    // disagree, and this is where a client finds out. Coercing a dict would hide it.
+    toolSchemas: {
+      predict: {
+        properties: {
+          state: { type: "string" },
+          questions: { type: "object" },
+        },
+        required: ["state", "questions"],
+      },
+    },
   },
 ]
+
+/** The spec for a backend name, or undefined. `findModel` throws; this one does not. */
+export function modelFor(name: string): ModelSpec | undefined {
+  return MODELS.find((m) => m.name === name)
+}
 
 export function findModel(name: string): ModelSpec {
   const spec = MODELS.find((m) => m.name === name)

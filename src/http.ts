@@ -27,6 +27,7 @@ import {
 import type { Config } from "./config.ts"
 import { daemonUrl } from "./paths.ts"
 import { healthReport } from "./health.ts"
+import { modelFor } from "./models.ts"
 import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
 import { VERSION } from "./version.ts"
@@ -74,8 +75,8 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
 
       // Restore the backend's own prefix on the way in. opencode knows the tool as
       // `predict`; the process only answers to `laya_predict`.
-      if (method === "tools/call" && prefix && typeof params.name === "string") {
-        params.name = prefix + params.name
+      if (method === "tools/call" && typeof params.name === "string") {
+        params.name = wireName(params.name, prefix)
       }
 
       // Forward disconnects so abandoned calls can release backend resources.
@@ -171,20 +172,22 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     if (url.pathname === "/catalog" && req.method === "GET") {
       // Read declared tools without calling a backend. Include wire prefixes for
       // /call; the plugin strips them only from displayed names.
-      const backendsOut = backends.names().map((name) => {
-        const backend = backends.get(name)
+      const backendsOut = backends.names().map((backendName) => {
+        const backend = backends.get(backendName)
         const prefix = backend.toolPrefix ?? ""
+        const schemas = modelFor(backendName)?.toolSchemas ?? {}
         return {
-          backend: name,
+          backend: backendName,
           toolPrefix: backend.toolPrefix,
           tools: {
             tools: backend.tools.map((tool) => ({
               name: prefix + tool,
-              // Accept an object here; the backend validates its own argument schema.
+              // A tool the model describes says so, and an undescribed one stays open:
+              // either way the backend validates its own arguments.
               description:
-                `${name} ${tool}. Forwards its arguments to ${name} unchanged; see the ` +
-                `backend's own tools/list for the authoritative schema.`,
-              inputSchema: { type: "object", additionalProperties: true },
+                `${backendName} ${tool}. Forwards its arguments to ${backendName} unchanged; ` +
+                `see the backend's own tools/list for the authoritative schema.`,
+              inputSchema: { type: "object", additionalProperties: true, ...schemas[tool] },
             })),
           },
         }
@@ -209,14 +212,36 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
         )
         return
       }
+      const backend = backends.get(body.backend)
+      // /mcp/:backend lists the bare name and /catalog advertises the prefixed one, so
+      // accept either: the caller should not have to know which endpoint it read from.
+      const name = wireName(body.tool, backend.toolPrefix)
       // The caller's disconnect, the same signal the MCP path uses, so a session that
       // gives up does not leave a model call running.
-      const result = await backends.call(
-        body.backend,
-        "tools/call",
-        { name: body.tool, arguments: body.arguments ?? {} },
-        clientDisconnect(req, res).signal,
-      )
+      let result: unknown
+      try {
+        result = await backends.call(
+          body.backend,
+          "tools/call",
+          { name, arguments: body.arguments ?? {} },
+          clientDisconnect(req, res).signal,
+        )
+      } catch (err) {
+        // Answer an unrecognized name with the names the backend does take. The declared
+        // list is consulted only here, so a stale entry still reaches the backend.
+        const wireNames = backend.tools.map((tool) => wireName(tool, backend.toolPrefix))
+        if (wireNames.includes(name)) throw err
+        res.writeHead(404, { "content-type": "application/json" })
+        res.end(
+          JSON.stringify({
+            error: "unknown_tool",
+            message:
+              `${body.backend} has no tool "${body.tool}"; it takes ` +
+              `${wireNames.map((n) => `"${n}"`).join(", ") || "nothing"}`,
+          }),
+        )
+        return
+      }
       res.writeHead(200, { "content-type": "application/json" })
       res.end(JSON.stringify({ result }))
       return
@@ -281,6 +306,14 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
       await new Promise<void>((resolve) => server.close(() => resolve()))
     },
   }
+}
+
+/**
+ * The name the backend process answers to. Both HTTP surfaces serve tools under
+ * this name and one under the bare name, so both must accept either form.
+ */
+function wireName(tool: string, prefix: string | undefined): string {
+  return prefix && !tool.startsWith(prefix) ? prefix + tool : tool
 }
 
 /**
