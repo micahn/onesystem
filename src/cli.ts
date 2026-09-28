@@ -28,6 +28,7 @@ import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { loadConfig, type Config } from "./config.ts"
 import { configCandidates, configDir, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
@@ -37,9 +38,9 @@ import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
 import {
   opencodeConfigPath,
-  pluginDir,
-  registerPlugin,
+  pluginAutoloadFile,
   switchToBackend,
+  unregisterPlugin,
   writeBackend,
 } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
@@ -368,57 +369,58 @@ async function cmdUse(args: string[]): Promise<number> {
 }
 
 /**
- * Add this plugin to opencode's config.
+ * Register this plugin with opencode, by dropping a file where it autodiscovers one.
  *
- * The one install step a shell script cannot do safely on its own. `opencode.json` is
- * hand-edited JSONC with comments in it, and appending an entry to a `plugins` array from
- * bash means either `sed` on a file whose layout nobody controls, or a `JSON.parse` round
- * trip that deletes every comment and every key it did not expect. The edit goes through
- * `jsonc-parser`, the same machinery the rest of this project uses on its own config.
+ * opencode V2 loads every `.ts` and `.js` file in `~/.config/opencode/plugins/`, so
+ * registering means writing one line there. It also removes the `plugins` array entry from
+ * `opencode.json`, because that was how an earlier version registered and leaving both means
+ * the same plugin loaded twice.
  *
- * Refuses rather than guesses. An existing `plugins` value that is not an array is somebody
- * else's deliberate shape, and the failure is loud either way.
+ * Writing the file is `open` and one string, so it is not worth a helper. The config edit
+ * is the part that needs code: `opencode.json` is hand-edited JSONC, and a `sed` or a
+ * `JSON.parse` round trip on it destroys comments and unrelated keys.
  */
 async function cmdRegisterPlugin(): Promise<number> {
-  const path = opencodeConfigPath()
-  const dir = pluginDir()
+  const file = pluginAutoloadFile()
+  try {
+    await mkdir(dirname(file.path), { recursive: true })
+    // Overwritten every run, so a moved checkout or an updated path self-heals. Only
+    // reported as a change when the bytes actually differ, so a re-run says "already".
+    const same = (await readFile(file.path, "utf8").catch(() => "")) === file.contents
+    await writeFile(file.path, file.contents)
+    process.stdout.write(`${same ? "already registered" : "registered"}: ${file.path}\n`)
+  } catch (err) {
+    process.stderr.write(`could not write ${file.path}: ${describeError(err)}\n`)
+    return 1
+  }
 
+  const path = opencodeConfigPath()
   let before: string
   try {
     before = await readFile(path, "utf8")
   } catch {
-    before = ""
+    return 0 // no config to clean up
   }
-
-  let result: ReturnType<typeof registerPlugin>
   try {
-    result = registerPlugin(before, dir)
-  } catch (err) {
-    process.stderr.write(`could not edit ${path}: ${describeError(err)}\n`)
-    return 1
-  }
+    const entry = fileURLToPath(new URL("../src/plugin", import.meta.url))
+    const result = unregisterPlugin(before, entry)
+    if (result.removed === 0) return 0
 
-  if (result.alreadyThere) {
-    process.stdout.write(`already registered in ${path}\n  ${dir}\n`)
-    return 0
-  }
-
-  // The same refuse-don't-clobber rule as `editConfig`: re-read before writing, because a
-  // person may have edited the file since we read it.
-  try {
-    const current = await readFile(path, "utf8").catch(() => "")
-    if (current !== before) {
+    // The same refuse-don't-clobber rule as `editConfig`: re-read before writing, because a
+    // person may have edited the file since we read it.
+    if ((await readFile(path, "utf8").catch(() => "")) !== before) {
       process.stderr.write(`${path} changed while this was running; not writing over it. Re-run.\n`)
       return 1
     }
-    await mkdir(dirname(path), { recursive: true })
     await writeFile(path, result.text)
+    process.stdout.write(
+      `removed ${result.removed} stale "plugins" entry from ${path}; autodetection covers it now\n`,
+    )
   } catch (err) {
-    process.stderr.write(`could not write ${path}: ${describeError(err)}\n`)
-    return 1
+    // Not fatal. The plugin is registered either way, and leaving the old entry in place
+    // only means it loads twice.
+    process.stderr.write(`note: could not clean ${path}: ${describeError(err)}\n`)
   }
-
-  process.stdout.write(`registered in ${path}\n  ${dir}\n`)
   return 0
 }
 

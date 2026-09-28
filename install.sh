@@ -257,13 +257,13 @@ fi
 # ── Stage 6: the opencode plugin ─────────────────────────────────────────
 stage "opencode plugin"
 
-# Not done with sed: opencode.json is hand-edited JSONC, and a text rewrite of a file
-# whose layout nobody controls is how an install eats somebody's config. This goes through
-# jsonc-parser, the same edit the rest of the project uses on its own config.
+# opencode V2 autodiscovers every .ts and .js file in ~/.config/opencode/plugins/, so
+# registering means writing one line there. It is a re-export of the checkout rather than a
+# copy, so `git pull` takes effect on the next reload instead of leaving a stale duplicate.
 if bun run src/cli.ts register-plugin; then
-  DONE+=("plugin registered in opencode's config")
+  DONE+=("plugin registered in opencode's plugins directory")
 else
-  SKIPPED+=("add the plugin to opencode.json by hand: {\"package\": \"$INSTALL_DIR/src/plugin\"}")
+  SKIPPED+=("add the plugin by hand: create ~/.config/opencode/plugins/onesystem.ts")
 fi
 
 # ── Stage 7: check it ────────────────────────────────────────────────────
@@ -302,6 +302,6 @@ cat <<EOF
   is tens of milliseconds.
 
   ${DIM}To uninstall: $UNINSTALL
-  and remove the plugins entry from opencode.json.${RESET}
+  and delete ~/.config/opencode/plugins/onesystem.ts.${RESET}
 
 EOF

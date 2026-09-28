@@ -66,14 +66,14 @@ One command, if your machine already has the prerequisites below:
 curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
 ```
 
-It clones to `~/.local/share/onesystem/repo`, builds the model, writes your config, and
-registers the opencode plugin. Safe to re-run: every step checks before it acts, nothing is
-overwritten without asking, and the only thing it will not do unprompted is run `sudo`. Set
-`ONESYSTEM_MODEL=julia` for the other model, or `ONESYSTEM_DIR=/path` to put the checkout
-somewhere else — the plugin is registered by absolute path, so that path has to stay put.
+It clones to `~/.local/share/onesystem/repo`, builds the model, writes your config, and drops
+a one-line file into `~/.config/opencode/plugins/` so opencode finds the plugin by itself.
+Safe to re-run: every step checks before it acts, nothing is overwritten without asking, and
+the only thing it will not do unprompted is run `sudo`. Set `ONESYSTEM_MODEL=julia` for the
+other model, or `ONESYSTEM_DIR=/path` to put the checkout somewhere else.
 
 Restart opencode afterwards. Plugins load at server start, so a session that is already open
-will not see the tools.
+will not see the tools. `opencode plugin list` shows what loaded.
 
 The steps below are what that script does, in case you would rather run them yourself.
 
@@ -158,28 +158,43 @@ Note that enabling one model disables the others, and the command tells you whic
 bun run src/cli.ts register-plugin
 ```
 
-That adds the entry to `~/.config/opencode/opencode.json`:
+That writes one file, `~/.config/opencode/plugins/onesystem.ts`:
 
-```jsonc
-{
-  "plugins": [{ "package": "/absolute/path/to/onesystem/src/plugin" }],
-  "mcp": { "servers": { /* delete a "laya-mcp" local entry if you have one */ } }
-}
+```ts
+export { default } from "/absolute/path/to/onesystem/src/plugin/index.ts"
 ```
 
-It goes through `jsonc-parser` rather than `sed`, because `opencode.json` is hand-edited
-JSONC: a text rewrite of a file whose layout nobody controls is how an install eats somebody's
-config, and a `JSON.parse` round trip would delete every comment in it. It is idempotent, so
-running it twice does not load the plugin twice.
+opencode V2 autodiscovers every `.ts` and `.js` file in that directory, so placing the plugin
+there is the whole of registration. The file is a re-export rather than a copy, for two
+reasons. Autodetection does not follow symlinks, so a symlink is not available. And a copy is
+wrong: the plugin imports `../health.ts` and friends and finds its own CLI at `../cli.ts`, so a
+copy of `src/plugin/` alone would not resolve, and a copy of the whole tree would be a second,
+silently stale copy of the code the plugin actually runs. A re-export always reads the
+checkout, so `git pull` takes effect on the next reload.
 
-`package` must be the **directory**, not the `index.ts` file. Pointing it at the file fails
-with `configured plugin path must be a directory` in
-`~/.local/share/opencode/log/opencode.log`, and the session ends up with no `laya` tools and
-no other symptom.
+If you previously registered through the `plugins` array in `opencode.json`, this removes
+that entry, since otherwise the same plugin loads twice. It is still a `jsonc-parser` edit
+rather than a `sed`: `opencode.json` is hand-edited JSONC, and a `JSON.parse` round trip would
+delete every comment in it.
 
-**Restart opencode after this change.** Plugins load at server startup; editing the config
-reconnects MCP servers but does not load a newly added plugin. Until you restart, the
-session has no `laya` tools at all.
+Check what opencode thinks it loaded:
+
+```sh
+opencode plugin list
+```
+
+One `onesystem` row pointing at the generated file is the answer you want.
+
+If you came from the old per-session setup, delete any `laya-mcp` entry from the `mcp.servers`
+block in `opencode.json`. As long as it is configured, every session keeps its own laya process
+and its own copy of the checkpoint, which is the entire problem this project exists to solve.
+The plugin registers `laya` itself, over HTTP, sharing one daemon.
+
+The plugin needs no options. It derives the CLI path from its own location, so it works from a
+checkout with nothing on `PATH`.
+
+**Restart opencode after this.** Plugins load at server startup, so a session that is already
+open will not see the tools.
 
 ### 5. Check it
 
@@ -193,34 +208,6 @@ read `cold`. The first tool call pays a 10-14 s cold load; a warm one is tens of
 
 There is no `onesystem` on `PATH` in a fresh checkout. The plugin finds the CLI from its own
 location, so that works; use `bun run src/cli.ts <command>` as above.
-
-Then in `~/.config/opencode/opencode.json`, register the plugin and **remove** the old
-per-session stdio entry:
-
-```jsonc
-{
-  "plugins": [{ "package": "/path/to/onesystem/src/plugin" }],
-  "mcp": { "servers": { /* delete the old "laya-mcp" local entry */ } }
-}
-```
-
-`package` must be the **directory**, not the `index.ts` file. Pointing it at the file
-fails with `configured plugin path must be a directory` in
-`~/.local/share/opencode/log/opencode.log`, and the session ends up with no `laya` tools
-and no other symptom. opencode resolves the entrypoint inside the directory itself.
-
-Removing the old entry is the part that matters. It is a `type: "local"` stdio server, so
-as long as it is configured, every session keeps its own laya process and its own copy of
-the checkpoint — which is the entire problem this project exists to solve. The plugin
-registers `laya` itself, over HTTP, sharing one daemon.
-
-The plugin needs no options: it derives the CLI path from its own location, so it works
-from a checkout with nothing on `PATH`. Override via `options` for a specific executable
-or different timeouts.
-
-**Restart opencode after this change.** Plugins load at server startup; editing the config
-reconnects MCP servers but does not load a newly added plugin. Until you restart, the
-session has no `laya` tools at all.
 
 ## Use
 
@@ -389,7 +376,7 @@ hold session start open.
 ## Tests
 
 ```sh
-bun test              # 312 unit and integration tests
+bun test              # 315 unit and integration tests
 ./test/e2e-laya.sh    # end to end against the real laya backend
 ```
 
