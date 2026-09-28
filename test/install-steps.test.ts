@@ -370,6 +370,7 @@ describe("an install on an NVIDIA card", () => {
     expect(manifest).toContain(`supersonic-julia = { path = "julia-src" }`)
     expect(manifest).not.toMatch(/rocm/i)
   })
+
 })
 
 describe("the checks on an installed environment", () => {
