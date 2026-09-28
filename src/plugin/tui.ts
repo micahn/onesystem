@@ -57,7 +57,10 @@ import { createSignal } from "solid-js"
 import { jsx } from "@opentui/solid/jsx-runtime"
 import { probeHealth, type HealthReport } from "../health.ts"
 import type { BackendStatus } from "../backend/types.ts"
-import { findModel, MODELS } from "../models.ts"
+import { MODELS } from "../models.ts"
+import { loadConfig } from "../config.ts"
+import { switchToBackend } from "../config-edit.ts"
+import { describeError } from "../async.ts"
 import { defaultCli, pluginLog, resolveBase, run } from "./discover.ts"
 
 /** How often to re-read /health. */
@@ -489,8 +492,12 @@ export default Plugin.define({
       }
       if (!choice?.startsWith("install:")) return
 
+      // The name came from `MODELS` ten lines above, so there is nothing to validate here.
+      // There used to be a `findModel(name)` on this line whose result was assigned and
+      // never used — the same validation `onesystem install` does anyway, in a different
+      // module, against the same array. `noUnusedLocals` is off, so nothing said so; the
+      // typecheck has since started catching it, which is how it was found.
       const name = choice.slice("install:".length)
-      const spec = findModel(name)
       const ok = await ctx.ui.dialog.confirm({
         title: `Install ${name}?`,
         message: `This downloads ${name} and its own PyTorch build, which is several GB. It is installed into onesystem's own directory and does not touch any existing Python environment.`,
@@ -508,11 +515,35 @@ export default Plugin.define({
         })
         return
       }
-      ctx.ui.toast.show({
-        title: `${name} installed`,
-        message: "Add it to your config as a backend — `onesystem install` prints the snippet.",
-        variant: "success",
-      })
+
+      // The second half, which the menu's own description promised and which it did not do.
+      // It used to stop here and tell you to hand-edit the config — while `config-edit.ts`
+      // sat there being excellent at exactly that edit, reachable from one command
+      // (`onesystem use`) that this menu could have called and did not.
+      //
+      // The switch is in-process rather than another `run()`, because the two halves of
+      // "install and switch" are now one function: `switchToBackend` is what `cmdUse`
+      // calls too, so a name this menu accepts and a name the CLI accepts cannot drift.
+      try {
+        const { config, path } = await loadConfig()
+        const switched = await switchToBackend(path, config, name)
+        ctx.ui.toast.show({
+          title: `${name} installed and switched to`,
+          message: switched.changed
+            ? `now enabled: ${switched.on.join(", ")}. Restart the daemon (or just make a tool call) to pick it up.`
+            : `${name} was already the only enabled backend.`,
+          variant: "success",
+        })
+      } catch (err) {
+        // Installed but not switched, which is a real and recoverable state: the runtime is
+        // on disk and usable. Saying so plainly is the difference between "it half worked"
+        // and "it did nothing", and the message carries the reason rather than a shrug.
+        ctx.ui.toast.show({
+          title: `${name} installed, but not switched to`,
+          message: `${describeError(err)}\n\nIt is on disk and usable — \`onesystem use ${name}\` will switch to it.`,
+          variant: "warning",
+        })
+      }
     }
 
     // `keymap.layer` is owned by a component, and the only component we have is the slot's

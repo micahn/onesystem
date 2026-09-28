@@ -35,7 +35,7 @@ import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
-import { backendStates, editConfig, setEnabled } from "./config-edit.ts"
+import { switchToBackend } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
 import { configHint, detectGpu, install, listRuntimes, runtimeDir, runtimesRoot, uninstall, verify } from "./install.ts"
 import { logger } from "./log.ts"
@@ -288,29 +288,24 @@ async function cmdUse(args: string[]): Promise<number> {
     return 2
   }
   const { config, path } = await loadConfig()
-  const states = backendStates(config)
-  if (!states.some((s) => s.name === name)) {
-    process.stderr.write(
-      `no backend named "${name}" in ${path}; found: ${states.map((s) => s.name).join(", ") || "none"}\n`,
-    )
-    return 2
-  }
 
-  const next = states.map((s) => ({ name: s.name, enabled: s.name === name }))
+  // The switch itself is `config-edit.switchToBackend`, not code in this function. It used
+  // to be here, in the one command that needed it, which left the TUI's install menu with
+  // no way to do the second half of what it promised.
+  let switched: Awaited<ReturnType<typeof switchToBackend>>
   try {
-    const result = await editConfig(path, (text) =>
-      next.reduce((acc, s) => setEnabled(acc, s.name, s.enabled), text),
-    )
-    if (!result.changed) {
-      process.stdout.write(`${name} is already the only enabled backend\n`)
-      return 0
-    }
+    switched = await switchToBackend(path, config, name)
   } catch (err) {
     process.stderr.write(`${describeError(err)}\n`)
     return 1
   }
 
-  for (const s of next) process.stdout.write(`${s.enabled ? "on " : "off"}  ${s.name}\n`)
+  if (!switched.changed) {
+    process.stdout.write(`${name} is already the only enabled backend\n`)
+    return 0
+  }
+  for (const n of switched.on) process.stdout.write(`on   ${n}\n`)
+  for (const n of switched.off) process.stdout.write(`off  ${n}\n`)
   process.stdout.write(`\n${path} updated. Run \`onesystem start\` to pick the change up.\n`)
   return 0
 }

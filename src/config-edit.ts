@@ -48,6 +48,47 @@ export function backendStates(config: Config): { name: string; enabled: boolean 
 }
 
 /**
+ * Make one backend the only enabled one.
+ *
+ * "Switching" is a flag: enabling a second backend does not need a new mechanism, because
+ * the tool surface namespaces itself per backend and the daemon supervises each one
+ * independently. So switching is `enabled: true` on one and `false` on the rest, which is
+ * what `setEnabled` has always done.
+ *
+ * What is new is that it lives here rather than inside the CLI's `cmdUse`. There was one
+ * implementation, in the one command that needed it, and the TUI's install menu was one
+ * call short of using it: the menu installed a model and then told you to hand-edit the
+ * config, while its own description promised "install and switch". A module that is
+ * excellent at a thing and is on one code path is a module waiting for its second caller,
+ * not a module with a bad interface — so this is the second caller.
+ *
+ * Throws rather than returning a failure, and the message names the backends that do exist,
+ * because the overwhelmingly likely cause is a typo and a list is the whole of the answer.
+ */
+export async function switchToBackend(
+  path: string,
+  config: Config,
+  name: string,
+): Promise<{ changed: boolean; on: string[]; off: string[] }> {
+  const states = backendStates(config)
+  if (!states.some((s) => s.name === name)) {
+    throw new Error(
+      `no backend named "${name}" in ${path}; found: ${states.map((s) => s.name).join(", ") || "none"}`,
+    )
+  }
+
+  const next = states.map((s) => ({ name: s.name, enabled: s.name === name }))
+  const result = await editConfig(path, (text) =>
+    next.reduce((acc, s) => setEnabled(acc, s.name, s.enabled), text),
+  )
+  return {
+    changed: result.changed,
+    on: next.filter((s) => s.enabled).map((s) => s.name),
+    off: next.filter((s) => !s.enabled).map((s) => s.name),
+  }
+}
+
+/**
  * Write a config edit, refusing rather than clobbering.
  *
  * The re-read before writing is not paranoia about our own write: a person may have

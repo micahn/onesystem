@@ -8,6 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
+import { writeFileSync } from "node:fs"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -105,5 +106,31 @@ describe("writing", () => {
     expect(result.changed).toBe(true)
     const onDisk = await readFile(path, "utf8")
     expect(onDisk).toContain("// keep this, it is the whole point")
+  })
+
+  test("it refuses rather than clobbering a file that changed underneath it", async () => {
+    // The invariant that justifies re-reading before writing: a person may have edited the
+    // file between our read and our write, and silently reverting their change because we
+    // held a stale copy is worse than refusing.
+    //
+    // The window is one microtask wide -- read, mutate, re-read, compare, write -- so the
+    // only way to hit it deterministically is to perform the concurrent edit from *inside*
+    // `mutate`, which is precisely where a real one would land. Racing a `writeFile` against
+    // the call from a test is a coin flip, and a coin-flip test is worse than no test.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-edit-"))
+    dirs.push(dir)
+    const path = join(dir, "onesystem.json")
+    await writeFile(path, SAMPLE)
+
+    await expect(
+      editConfig(path, (text) => {
+        writeFileSync(path, `${text}\n// edited by someone else, mid-command\n`)
+        return setEnabled(text, "julia", true)
+      }),
+    ).rejects.toThrow(/changed while this command was running/)
+
+    // And the other person's edit is what is on disk. Refusing has to mean refusing.
+    const onDisk = await readFile(path, "utf8")
+    expect(onDisk).toContain("edited by someone else, mid-command")
   })
 })
