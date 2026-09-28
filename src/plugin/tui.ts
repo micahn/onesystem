@@ -499,7 +499,7 @@ export default Plugin.define({
         const name = choice.slice("uninstall:".length)
         const ok = await ctx.ui.dialog.confirm({
           title: `Uninstall ${name}?`,
-          message: `This deletes the ${name} runtime, which is several GB. Downloaded weights are kept, and the ${name} block in the config is left as it is.`,
+          message: `This deletes the ${name} runtime, which is several GB, and turns it off. Downloaded weights are kept.`,
           label: { confirm: "Uninstall", cancel: "Cancel" },
         })
         if (!ok) return
@@ -514,19 +514,26 @@ export default Plugin.define({
           })
           return
         }
-        // The runtime is gone but the config still names it, and an enabled backend with
-        // no runtime behind it is what turns every later call into a 500.
-        const still = await probeConfig()
-        const on = still.config && backendStates(still.config).find((b) => b.name === name)?.enabled
-        ctx.ui.toast.show(
-          on
-            ? {
-                title: `${name} uninstalled`,
-                message: `its config block is still enabled, so its tools will now fail. Disable it here, or \`onesystem use <model>\`.`,
-                variant: "warning",
-              }
-            : { message: `${name} uninstalled`, variant: "success" },
-        )
+
+        // Disable it as part of the uninstall, rather than warning afterwards. A runtime
+        // that is gone and still enabled keeps its tools in the catalog and turns every
+        // later call into an ENOENT, and the only place that shows is the card's tone.
+        let disabled = false
+        try {
+          const { config, path } = await loadConfig()
+          disabled = (await setBackendEnabled(path, config, name, false)).changed
+        } catch (err) {
+          ctx.ui.toast.show({
+            title: `${name} is uninstalled but still enabled`,
+            message: `${describeError(err)}\n\nIts tools will fail until it is turned off.`,
+            variant: "warning",
+          })
+          return
+        }
+
+        // The daemon reads its backend list once at startup, so a config change needs one.
+        if (disabled) await restartDaemon(`${name} uninstalled and turned off`)
+        else ctx.ui.toast.show({ message: `${name} uninstalled`, variant: "success" })
         return
       }
 

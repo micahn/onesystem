@@ -155,7 +155,7 @@ export function topMenu(
     opts.push({
       title: `Uninstall ${name}`,
       value: `uninstall:${name}`,
-      description: "removes the runtime; its config block stays",
+      description: "removes the runtime and turns it off",
       category: "Uninstall",
     })
   }

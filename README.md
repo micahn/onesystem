@@ -299,7 +299,7 @@ AMD RX 9070 XT (gfx1201), ROCm 6.4 driver, ROCm 7.2 PyTorch wheel, laya 0.3.21:
 
 | Operation | Time or memory |
 | --- | --- |
-| Install laya, warm uv cache | ~10 s |
+| Install laya, warm uv cache | ~10 s; ~8 min when the venv is gone |
 | Install julia, including 585 MB of weights | ~46 s |
 | Start daemon, no model loaded | ~190 ms |
 | First tool call | laya ~13.7 s; julia ~15.7 s |

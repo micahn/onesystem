@@ -379,8 +379,8 @@ describe("install and uninstall are the same list, split by what is on disk", ()
     const row = opts.find((o) => o.value === "uninstall:laya")!
     expect(row.title).toBe("Uninstall laya")
     expect(row.category).toBe("Uninstall")
-    // The config block survives, which is a trap the row should name.
-    expect(row.description).toContain("config block stays")
+    // The row says what happens to the backend, so the choice is not a surprise.
+    expect(row.description).toContain("turns it off")
   })
 
   test("the two sections are mutually exclusive", () => {
@@ -427,11 +427,29 @@ describe("install and uninstall are the same list, split by what is on disk", ()
     expect(src).toContain('"uninstall", name')
   })
 
-  test("uninstalling something that leaves the config enabled says so", async () => {
-    // An enabled backend with no runtime behind it is what turns every later call into a
-    // 500, and `uninstall` only removes the directory.
+  test("uninstalling turns the backend off, so no call is left pointing at a missing runtime", async () => {
+    // `uninstall` only removes the directory. Left enabled, the backend keeps its tools in
+    // the catalog and every later call is an ENOENT -- which is how a real laya runtime
+    // ended up deleted on a machine that still listed it. Disabling is part of the
+    // uninstall, not a warning printed after it.
     const src = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
-    const afterUninstall = src.indexOf("await run(cli.command, [...cli.args, \"uninstall\", name])")
-    expect(src.indexOf("still enabled", afterUninstall)).toBeGreaterThan(afterUninstall)
+    const afterUninstall = src.indexOf('await run(cli.command, [...cli.args, "uninstall", name])')
+    const disable = src.indexOf("setBackendEnabled(path, config, name, false)", afterUninstall)
+    expect(disable).toBeGreaterThan(afterUninstall)
+    // And the daemon is restarted, because it reads its backend list once at startup.
+    expect(src.indexOf("restartDaemon(", afterUninstall)).toBeGreaterThan(disable)
+  })
+
+  test("the confirm dialog says the model is turned off, not that it is left alone", async () => {
+    const src = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+    expect(src).toContain("deletes the ${name} runtime, which is several GB, and turns it off")
+    expect(src).not.toContain("is left as it is")
+  })
+
+  test("the row no longer promises to leave the config block alone", () => {
+    const row = topMenu(probe(full), DEFAULT_SETTINGS, disk("laya")).find(
+      (o) => o.value === "uninstall:laya",
+    )!
+    expect(row.description).toBe("removes the runtime and turns it off")
   })
 })
