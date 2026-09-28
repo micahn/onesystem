@@ -60,8 +60,15 @@ working, not a bug.
 
 ## Install
 
-Requires [bun](https://bun.sh) and [uv](https://docs.astral.sh/uv/). uv is only needed for
-`onesystem install`; bun runs everything else.
+Requires opencode **V2**, [bun](https://bun.sh), and [uv](https://docs.astral.sh/uv/). uv is
+only needed for `onesystem install`; bun runs everything else.
+
+> **V2 only.** onesystem is a V2 plugin, and V1 has no plugin API, so on V1 the tools never
+> appear and nothing explains why. Check with `opencode --version`. If your `opencode` is
+> managed by mise and reports 1.x, install V2 alongside it and make sure the V2 binary is the
+> one first on `PATH` — installing V2 does not displace a mise-managed V1. The daemon and the
+> CLI work fine under V1; only the plugin registration does not, so `onesystem start` and
+> `onesystem status` are still useful for checking an install.
 
 ```sh
 bun install

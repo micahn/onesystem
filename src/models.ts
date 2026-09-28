@@ -61,6 +61,21 @@ export interface ModelSpec {
    * the first call, long after the install reported success.
    */
   readonly weights?: { readonly repo: string; readonly envVar: string }
+  /**
+   * The MCP tool names this model publishes, without any product prefix.
+   *
+   * Declared rather than discovered, because discovering it means starting the model, and
+   * starting the model is the 20-54s load and 3 GB of VRAM that lazy start exists to keep
+   * off a path the agent did not ask for. The installer prints these so a generated config
+   * block is complete; the shipped config repeats them by hand, and nothing checks that the
+   * two agree with the model itself.
+   */
+  readonly tools?: readonly string[]
+  /**
+   * A sentence about the `command` a person still has to fill in, for models that ship
+   * their own server rather than a library onesystem runs a shim beside.
+   */
+  readonly commandNote?: string
 }
 
 export const MODELS: readonly ModelSpec[] = [
@@ -69,6 +84,19 @@ export const MODELS: readonly ModelSpec[] = [
     requirement: "laya[mcp]==0.3.21",
     requiresPython: ">=3.12,<3.15",
     interpreterEnv: "LAYA_PYTHON",
+    // laya ships its own MCP server, so the command is that binary and not anything this
+    // project can derive. Measured against laya 0.3.21 via its own `tools/list`.
+    tools: [
+      "predict",
+      "status",
+      "route",
+      "decide",
+      "shortlist",
+      "preset",
+      "predict_batch",
+      "route_batch",
+    ],
+    commandNote: "the laya MCP server binary, e.g. laya-mcp-idle-server on your PATH",
   },
   {
     name: "julia",
@@ -84,6 +112,9 @@ export const MODELS: readonly ModelSpec[] = [
     source: { repo: "SupersonicLabs/Julia-1", allow: ["julia/**", "pyproject.toml", "README.md"] },
     needsMcp: true,
     weights: { repo: "SupersonicLabs/Julia-1", envVar: "JULIA_CHECKPOINT" },
+    // julia ships a library and no server, so the shim in this repo is the surface, and it
+    // publishes exactly one tool.
+    tools: ["predict"],
   },
 ]
 

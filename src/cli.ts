@@ -205,8 +205,11 @@ async function cmdInstall(args: string[]): Promise<number> {
     const gpu = await detectGpu(run)
     const check = await verify(runtime.dir, gpu, run)
     process.stdout.write(`installed ${name}\n  interpreter: ${runtime.python}\n`)
+    // Not gated on `interpreterEnv`. That was the condition, and only laya has one, so
+    // `onesystem install julia` said nothing about how to use what it had just built --
+    // which is the only question someone has at that point.
+    process.stdout.write(`\nadd to your config so the backend uses it:\n${configHint(spec, runtime)}\n`)
     if (spec.interpreterEnv) {
-      process.stdout.write(`\nadd to your config so the backend uses it:\n${configHint(spec, runtime)}\n`)
       process.stdout.write(
         `\n${spec.interpreterEnv} must be set in the config, not the shell: the daemon inherits\n` +
           `nothing from the session that started it.\n`,

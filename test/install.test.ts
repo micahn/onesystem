@@ -8,7 +8,9 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { assertNoAcceleratorMixups, pyprojectFor, ROCM_INDEX } from "../src/install.ts"
+import { parse } from "jsonc-parser"
+import { assertNoAcceleratorMixups, configHint, pyprojectFor, ROCM_INDEX } from "../src/install.ts"
+import { validate } from "../src/config.ts"
 import { findModel, MODELS } from "../src/models.ts"
 
 const amd = { vendor: "amd", gfx: "gfx1201" } as const
@@ -154,5 +156,94 @@ describe("the model table", () => {
       expect(m.requirement).toMatch(/==\d+\.\d+\.\d+/)
       expect(m.requiresPython).toMatch(/^>=\d+\.\d+/)
     }
+  })
+})
+
+describe("the config hint", () => {
+  const runtimeFor = (name: string) => ({
+    name,
+    dir: `/data/runtimes/${name}`,
+    python: `/data/runtimes/${name}/.venv/bin/python`,
+    installed: true,
+  })
+
+  /**
+   * Parse the hint the way a person would: paste it into a config and load that.
+   *
+   * The hint's whole job is to be pasteable, and it is printed by `onesystem install` as the
+   * answer to "how do I use this". It shipped without `tools`, which `validate` rejects, so
+   * the documented path produced a config that could not load and the error named a missing
+   * key rather than the install. Asserting the *string* would not have caught that; the
+   * failure was only visible by running the real validator.
+   */
+  const asBackend = (name: string) => {
+    const spec = findModel(name)
+    const hint = configHint(spec, runtimeFor(name))
+    // The hint is a backend fragment, so wrap it in the minimum config that holds one.
+    const text = `{"port": 7331, "backends": {${hint}}}`
+    return { spec, hint, text, parsed: parse(text) as Record<string, unknown> }
+  }
+
+  test("it produces a backend the validator accepts, for every model", () => {
+    for (const m of MODELS) {
+      const { spec, text, parsed } = asBackend(m.name)
+      let rejected: string | null = null
+      try {
+        validate(parsed, "hint.json")
+      } catch (err) {
+        rejected = err instanceof Error ? err.message : String(err)
+      }
+      expect(`${spec.name}: ${rejected ?? "accepted"}`).toBe(`${spec.name}: accepted`)
+      // Silence the unused-variable warning while keeping the text for the failure message.
+      expect(typeof text).toBe("string")
+    }
+  })
+
+  test("it never prints a placeholder command", () => {
+    // The one output whose entire purpose is to contain no placeholders used to print
+    // `["/path/to/shim"]` for a model with no local weights.
+    for (const m of MODELS) {
+      expect(`${m.name}: ${configHint(m, runtimeFor(m.name))}`).not.toContain("/path/to/shim")
+    }
+  })
+
+  test("a model that ships its own server says which binary to point at", () => {
+    // laya runs a binary onesystem has no way to locate, so the hint has to name it rather
+    // than invent a path. This is the one field a person still fills in.
+    const { hint } = asBackend("laya")
+    expect(hint).toMatch(/laya-mcp-idle-server/)
+  })
+
+  test("a model that ships a library points at this repo's shim", () => {
+    // julia has no server of its own, so the command is fully determined and must not
+    // leave a person guessing.
+    const { hint } = asBackend("julia")
+    expect(hint).toContain("/src/shims/julia-mcp.py")
+    expect(hint).toContain("/data/runtimes/julia/.venv/bin/python")
+  })
+
+  test("it declares the model's tool surface, because it cannot be discovered", () => {
+    for (const m of MODELS) {
+      expect(`${m.name}: ${JSON.stringify(m.tools)}`).not.toMatch(/: undefined/)
+      const { hint } = asBackend(m.name)
+      for (const tool of m.tools!) expect(hint).toContain(`"${tool}"`)
+    }
+  })
+
+  test("a model that declares no tools is refused rather than given an empty list", () => {
+    // `validate` rejects an empty `tools`, so emitting one would print a snippet that cannot
+    // load. The gap belongs in the model table, so the hint says so instead of hiding it.
+    const spec = { ...findModel("julia"), tools: [] }
+    expect(() => configHint(spec, runtimeFor("julia"))).toThrow(/declares no tools/)
+    const missing = { ...findModel("julia"), tools: undefined }
+    expect(() => configHint(missing, runtimeFor("julia"))).toThrow(/declares no tools/)
+  })
+
+  test("a weights env var points at the directory the installer actually writes", () => {
+    // Weights are fetched outside the runtime so a reinstall does not take them with it, so
+    // the path here is the weights directory and not the runtime that sits next to it.
+    const { hint } = asBackend("julia")
+    expect(hint).toContain("JULIA_CHECKPOINT")
+    expect(hint).toMatch(/weights[\\/]julia/)
   })
 })

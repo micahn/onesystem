@@ -612,19 +612,62 @@ export async function uninstall(name: string): Promise<boolean> {
   return true
 }
 
-/** The config snippet that points a backend at an installed runtime. */
+/**
+ * The config snippet that points a backend at an installed runtime.
+ *
+ * It has to be a snippet `validate` accepts, because the README tells people to paste it
+ * and the shipped config tells them this is where the real paths come from. It was neither.
+ * It omitted `tools`, which `validate` rejects, and for a model with no local weights it
+ * printed `"command": ["/path/to/shim"]` -- a placeholder in the one output whose entire
+ * job is to contain no placeholders. So the documented happy path produced a config that
+ * could not load, and the failure named a missing `tools` key rather than the install.
+ *
+ * `tools` cannot be derived from the model without loading it, which is the 20-54s cost
+ * this project exists to avoid, so a model declares its own surface and the hint prints it.
+ * That makes `ModelSpec.tools` a claim about the model that nothing can check, which is
+ * the same trade the shipped config makes and for the same reason.
+ */
 export function configHint(spec: ModelSpec, runtime: Runtime): string {
   const env: string[] = []
   if (spec.interpreterEnv) env.push(`"${spec.interpreterEnv}": "${runtime.python}"`)
   if (spec.weights) {
     env.push(`"${spec.weights!.envVar}": "${weightsDir(spec.name)}"`)
   }
-  const body = env.length > 0 ? `\n        ${env.join(",\n        ")}` : ""
+
+  // A model with weights is a library, so the interpreter runs our shim beside it. A model
+  // that ships its own MCP server runs that binary, and onesystem has no way to learn its
+  // path -- so this is the one value a person still has to fill in.
+  //
+  // It is a quoted string rather than a bare `<...>` marker so the snippet still parses as
+  // JSON. The earlier form was unquoted, which meant the one output meant to be pasted into
+  // a config was not valid JSON, so a person who pasted it got a parse error instead of a
+  // config with one obvious gap in it.
+  const shimPath = `"/path/to/onesystem/src/shims/${spec.name}-mcp.py"`
   const command = spec.weights
-    ? `[\n        "${runtime.python}",\n        "/path/to/onesystem/src/shims/${spec.name}-mcp.py"\n      ]`
-    : `["/path/to/shim"]`
+    ? `[\n        "${runtime.python}",\n        ${shimPath}\n      ]`
+    : `["REPLACE: path to the ${spec.name} MCP server binary on your machine"]`
+
+  // `tools` is optional on the type but required for the hint to be pasteable: `validate`
+  // rejects an empty list, so a model that declares none would print `"tools": []` and fail
+  // on load. That is a gap in the model table, not something to paper over here, and saying
+  // so is more use than emitting a snippet that cannot load.
+  if (!spec.tools || spec.tools.length === 0) {
+    throw new Error(
+      `cannot write a config block for ${spec.name}: it declares no tools, and they cannot be ` +
+        `discovered without loading the model. Add \`tools\` to its ModelSpec in src/models.ts.`,
+    )
+  }
+  const tools = spec.tools.map((t) => JSON.stringify(t))
+  // The `env` block is assembled whole, with its own braces. It used to be spliced in as a
+  // bare list of `"NAME": "value"` lines after `command`, which produced a snippet with a
+  // dangling `LAYA_PYTHON` and no `"env":` key anywhere in it -- so the one line the CLI
+  // insists you set was the one line the hint printed uselessly.
+  const envBlock = env.length > 0 ? `\n    "env": {\n      ${env.join(",\n      ")}\n    },` : ""
+  const note = spec.commandNote ? `\n    // ${spec.commandNote}` : ""
   return `  "${spec.name}": {
-    "transport": "stdio-mcp",
-    "command": ${command},${body}
+    "transport": "stdio-mcp",${note}
+    "command": ${command},${envBlock}
+    // Declared, not discovered: reading these from the model is the model load.
+    "tools": [${tools.join(", ")}]
   }`
 }
