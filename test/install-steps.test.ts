@@ -158,7 +158,10 @@ function scripted(plan: Plan = {}): { runner: Runner; steps: Step[]; cwds: (stri
       case "verify": {
         if (plan.torch === "fail") return fail("ModuleNotFoundError: No module named 'torch'")
         if (plan.torch === "garbage") return ok({ stdout: "warning: something\nnot json\n" })
-        return ok({ stdout: JSON.stringify(plan.torch ?? ROCM_TORCH) })
+        // The default has to follow the simulated vendor. A ROCm torch on an NVIDIA card
+        // is a machine that does not exist, and `verify` rightly refuses it.
+        const fallback = plan.gpu === "nvidia" ? CUDA_TORCH : ROCM_TORCH
+        return ok({ stdout: JSON.stringify(plan.torch ?? fallback) })
       }
       case "unclassified":
         return fail(`the script was asked for something it does not model: ${cmd} ${args.join(" ")}`)
@@ -181,8 +184,10 @@ describe("the order of the steps", () => {
     // shortest complete path through it -- and it is only this short because the fetches
     // are conditional, which is a fact about the order worth pinning.
     const { runner, steps } = scripted()
-    const rt = await install(findModel("laya"), { runner })
+    const said: string[] = []
+    const rt = await install(findModel("laya"), { runner, onProgress: (m) => said.push(m) })
 
+    expect(said[0]).toContain("installing laya for gfx1201")
     expect(steps).toEqual([
       "have:uv",
       "have:lspci",
@@ -342,9 +347,12 @@ describe("an install on an NVIDIA card", () => {
     // what caught the missing `[tool.uv.sources]` -- the manifest was asked for PyPI's
     // `supersonic-julia`, a package that is not on PyPI.
     const { runner, steps } = scripted({ gpu: "nvidia" })
-    const rt = await install(findModel("julia"), { runner })
+    const said: string[] = []
+    const rt = await install(findModel("julia"), { runner, onProgress: (m) => said.push(m) })
 
     expect(steps).not.toContain("unclassified")
+    // `gfx` is absent for NVIDIA, so the message names the vendor there (#16).
+    expect(said[0]).toContain("installing julia for nvidia")
     expect(steps).toEqual([
       "have:uv",
       "have:lspci",
@@ -372,7 +380,22 @@ describe("the checks on an installed environment", () => {
     expect(check).toEqual({ ok: true, problems: [], torch: "6.2.0" })
   })
 
-  // These three assert through `install`, not through `verify` on a finished directory,
+  test("a CUDA build for the right vendor passes", async () => {
+    // Only reachable once the fixture's default torch follows the simulated vendor (#15):
+    // an NVIDIA case before that was an NVIDIA card running a ROCm torch, which `verify` refuses.
+    const { runner } = scripted({ gpu: "nvidia" })
+    const rt = await install(findModel("laya"), { runner })
+    const check = await verify(rt.dir, { vendor: "nvidia" }, runner)
+    expect(check).toEqual({ ok: true, problems: [], torch: "13.0" })
+  })
+
+  test("an NVIDIA torch that cannot see the GPU is caught, build correct or not", async () => {
+    // `torch.cuda.is_available()` is the shared gate, and it has to fire on both vendors.
+    const { runner } = scripted({ gpu: "nvidia", torch: { ...CUDA_TORCH, available: false } })
+    await expect(install(findModel("laya"), { runner })).rejects.toThrow(/no GPU visible/)
+  })
+
+  // These assert through `install`, not through `verify` on a finished directory,
   // because a torch with the wrong properties is exactly the case where install refuses
   // to publish: there is no finished directory to run `verify` against. Asserting the
   // refusal is also the version a user meets.
@@ -380,6 +403,12 @@ describe("the checks on an installed environment", () => {
   test("a CUDA build on an AMD card is named as the problem it is", async () => {
     const { runner } = scripted({ torch: CUDA_TORCH })
     await expect(install(findModel("laya"), { runner })).rejects.toThrow(/CUDA build/)
+  })
+
+  test("a ROCm build on an NVIDIA card is named as the problem it is", async () => {
+    const { runner } = scripted({ gpu: "nvidia", torch: ROCM_TORCH })
+    await expect(install(findModel("laya"), { runner })).rejects.toThrow(/ROCm build of torch/)
+    await assertNothingPublished("laya")
   })
 
   test("a build for the wrong arch says which arch it knows", async () => {

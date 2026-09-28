@@ -239,7 +239,7 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
 
   const dir = runtimeDir(spec.name)
   const say = options.onProgress ?? (() => {})
-  say(`installing ${spec.name} for ${gpu.gfx} into ${dir}`)
+  say(`installing ${spec.name} for ${gpu.gfx ?? gpu.vendor} into ${dir}`)
 
   // Built in place and moved into position at the end, so a killed run never leaves a
   // directory that looks installed.
@@ -403,8 +403,8 @@ export async function repairShebangs(dir: string, staging: string, python: strin
 }
 
 /**
- * Check PyTorch and GPU visibility for install and doctor. A ROCm build reports a
- * HIP version and no CUDA version. Bound the import through the supplied runner.
+ * Check PyTorch and GPU visibility for install and doctor. The build has to match the
+ * detected vendor. Bound the import through the supplied runner.
  */
 export async function verify(
   dir: string,
@@ -442,14 +442,21 @@ export async function verify(
   }
 
   const problems: string[] = []
-  // The cheap discriminator: a ROCm build reports a HIP version and no CUDA version.
-  if (info.cuda !== null) problems.push("this is a CUDA build of torch; it cannot see an AMD GPU")
-  if (info.hip === null) problems.push("torch reports no HIP version, so it is not a ROCm build")
-  if (!info.available) problems.push("torch.cuda.is_available() is false: no GPU visible to this interpreter")
-  if (gpu.gfx && !info.arch.includes(gpu.gfx)) {
-    problems.push(`torch was not built for ${gpu.gfx}; it knows ${info.arch.join(", ") || "nothing"}`)
+  // The cheap discriminator, and it is relative to the card: a ROCm build reports a HIP
+  // version and no CUDA version, so asking for the wrong one refuses a correct build.
+  if (gpu.vendor === "amd") {
+    if (info.cuda !== null) problems.push("this is a CUDA build of torch; it cannot see an AMD GPU")
+    if (info.hip === null) problems.push("torch reports no HIP version, so it is not a ROCm build")
+    if (gpu.gfx && !info.arch.includes(gpu.gfx)) {
+      problems.push(`torch was not built for ${gpu.gfx}; it knows ${info.arch.join(", ") || "nothing"}`)
+    }
+  } else {
+    if (info.hip !== null) problems.push("this is a ROCm build of torch; it cannot see an NVIDIA GPU")
+    if (info.cuda === null) problems.push("torch reports no CUDA version, so it is not a CUDA build")
   }
-  return { ok: problems.length === 0, problems, torch: info.hip ?? undefined }
+  // Shared by both vendors, and last, so a build check cannot hide it.
+  if (!info.available) problems.push("torch.cuda.is_available() is false: no GPU visible to this interpreter")
+  return { ok: problems.length === 0, problems, torch: info.hip ?? info.cuda ?? undefined }
 }
 
 export async function listRuntimes(): Promise<Runtime[]> {
