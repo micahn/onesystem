@@ -31,19 +31,27 @@ export function lockPath(): string {
   return join(stateDir(), "daemon.lock")
 }
 
-export function defaultConfigPath(): string {
-  return join(configDir(), "onesystem.json")
+/**
+ * The user's config, in the order they are looked for.
+ *
+ * `.jsonc` first because the file carries comments, and a `.json` extension on a file with
+ * comments in it is a small lie: every editor, linter and syntax highlighter will treat
+ * those lines as errors. `.json` second so a config written before the rename keeps
+ * working rather than being silently ignored in favour of a bundled example.
+ */
+export function configPaths(): string[] {
+  return [join(configDir(), "onesystem.jsonc"), join(configDir(), "onesystem.json")]
 }
 
 /** Where a bundled example lives, used when the user has no config yet. */
 export function shippedConfigPath(): string {
-  return new URL("../onesystem.config.json", import.meta.url).pathname
+  return new URL("../onesystem.config.jsonc", import.meta.url).pathname
 }
 
 /**
  * Every path `loadConfig` would try, in order.
  *
- * The first is what a person means by "my onesystem config"; the second is the bundled
+ * The first two are what a person means by "my onesystem config"; the last is the bundled
  * example, so a fresh checkout runs without being told where anything is. `config-path`
  * prints all of them with which one is in use, because the old helper returned only the
  * first and claimed to be "the config file that would be used" — which is false for
@@ -54,7 +62,7 @@ export function shippedConfigPath(): string {
  * a question they thought they had answered.
  */
 export function configCandidates(path?: string): string[] {
-  return path ? [path] : [defaultConfigPath(), shippedConfigPath()]
+  return path ? [path] : [...configPaths(), shippedConfigPath()]
 }
 
 /**

@@ -40,8 +40,8 @@ function buildStatus(): DaemonStatus {
   )
   const base = daemonUrl(config.host, config.port)
   return {
-    config: "/home/u/.config/onesystem/onesystem.json",
-    configCandidates: ["/home/u/.config/onesystem/onesystem.json", "/src/onesystem.config.json"],
+    config: "/home/u/.config/onesystem/onesystem.jsonc",
+    configCandidates: ["/home/u/.config/onesystem/onesystem.jsonc", "/src/onesystem.config.jsonc"],
     configDir: "/home/u/.config/onesystem",
     url: base,
     running: true,

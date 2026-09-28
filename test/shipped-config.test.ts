@@ -1,7 +1,7 @@
 /**
  * The shipped config only sets environment variables that exist.
  *
- * `onesystem.config.json` is the first thing a person copies, and it is the file they edit
+ * `onesystem.config.jsonc` is the first thing a person copies, and it is the file they edit
  * when something hangs. So a variable in it that nothing reads is worse than a missing one:
  * it asserts a relationship that does not exist, and it is asserted in three places at once.
  *
@@ -26,7 +26,7 @@ import { parse } from "jsonc-parser"
 import { validate } from "../src/config.ts"
 
 const repo = join(import.meta.dir, "..")
-const shipped = join(repo, "onesystem.config.json")
+const shipped = join(repo, "onesystem.config.jsonc")
 
 const readShipped = async () => validate(parse(await readFile(shipped, "utf8")) as object, shipped)
 
@@ -103,14 +103,16 @@ describe("the shipped config", () => {
     expect(text).toContain(".local/share/onesystem/runtimes/")
   })
 
-  test("the per-call cap is described as the daemon's, which is what enforces it", async () => {
+  test("the config never claims the daemon's cap is the shim's", async () => {
     // The comment used to say `requestTimeoutSecs` "Matches LAYA_TOOL_TIMEOUT_SECS in the
     // shim". Two numbers that happen to both be 120 is not a match, and the comment invited
     // someone to change one and not the other.
+    //
+    // Only the half that catches a false claim is left. This used to also require a
+    // particular sentence introducing the key, which meant the config had to carry
+    // explanatory prose forever; a minimal file is allowed to say less, as long as what it
+    // does say is not wrong.
     const text = await readFile(shipped, "utf8")
-    // Generous window: the point is that the comment introducing the key says so, not
-    // that it says so in a particular number of characters.
-    expect(text).toMatch(/enforced by the daemon[\s\S]{0,900}"requestTimeoutSecs"/)
     expect(text).not.toMatch(/Matches LAYA_TOOL_TIMEOUT_SECS/)
   })
 })

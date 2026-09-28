@@ -66,7 +66,7 @@ Requires [bun](https://bun.sh) and [uv](https://docs.astral.sh/uv/). uv is only 
 ```sh
 bun install
 mkdir -p ~/.config/onesystem
-cp onesystem.config.json ~/.config/onesystem/onesystem.json
+cp onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
 ```
 
 That config is a **template, not a working file.** Every path in it is a placeholder
@@ -141,8 +141,10 @@ Logs go to `~/.local/state/onesystem/daemon.log`.
 
 ## Configuration
 
-`~/.config/onesystem/onesystem.json`, JSONC. See `onesystem.config.json` for the annotated
-version.
+`~/.config/onesystem/onesystem.jsonc`. A `.json` name there still works, but `.jsonc` is
+what the docs and `onesystem config-path` use: the file carries comments, and a `.json`
+extension makes every editor and linter report those lines as errors. See
+`onesystem.config.jsonc` for the annotated version.
 
 | Field | Default | Meaning |
 | --- | --- | --- |

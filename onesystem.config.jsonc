@@ -1,0 +1,87 @@
+// Template config. Every path below is a placeholder, because the real ones depend on
+// your interpreter and your weights directory. Run `onesystem install <model>` to build a
+// runtime; it prints the exact block for your machine, and `onesystem use <model>` switches
+// this file to it.
+//
+// Full documentation is in README.md.
+
+{
+  "host": "127.0.0.1",
+  "port": 7331,
+
+  // Wind down after this long with no traffic. Long on purpose: a model load costs 20-54s
+  // and 3 GB of VRAM, so exiting sooner only moves that cost to the next session.
+  "idleShutdownSecs": 600,
+
+  // How often the idle check runs. A timestamp compare, so it can be cheap.
+  "idleSweepSecs": 5,
+
+  // Ceiling on one forwarded call, enforced by the daemon. No child enforces this.
+  "requestTimeoutSecs": 120,
+
+  // Which model answers when the agent has not said. Ignored unless more than one backend
+  // is enabled. `tasks` is guidance the plugin logs, not dispatch.
+  "routing": {
+    "enabled": false,
+    "default": "laya",
+    "tasks": {
+      "engineering": "laya",
+      "triage": "julia"
+    }
+  },
+
+  "backends": {
+    "laya": {
+      "transport": "stdio-mcp",
+      "command": ["/path/to/bin/laya-mcp-idle-server"],
+      "env": {
+        "LAYA_DEVICE": "cuda",
+        "LAYA_PRELOAD": "0",
+        "LAYA_IDLE_UNLOAD_SECS": "300",
+        "LAYA_TOOL_TIMEOUT_SECS": "120",
+        // Set here rather than in your shell: the daemon inherits nothing from the session
+        // that started it, and the shim falls back to an interpreter that cannot see the GPU.
+        "LAYA_PYTHON": "/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/python"
+      },
+      // Generous because the shim is silent for ~30s importing transformers before it
+      // binds stdio.
+      "startupTimeoutSecs": 180,
+      // This backend's tool names, without the `laya_` prefix. Declared by hand because
+      // reading them from the process would load the model at session start.
+      "tools": [
+        "predict",
+        "status",
+        "route",
+        "decide",
+        "shortlist",
+        "preset",
+        "predict_batch",
+        "route_batch"
+      ],
+      "toolPrefix": "laya_"
+    },
+
+    "julia": {
+      "transport": "stdio-mcp",
+      "command": [
+        "/home/you/.local/share/onesystem/runtimes/julia/.venv/bin/python",
+        "/path/to/onesystem/src/shims/julia-mcp.py"
+      ],
+      "env": {
+        "JULIA_DEVICE": "cuda",
+        "JULIA_CHECKPOINT": "/home/you/.local/share/onesystem/weights/julia"
+      },
+      "startupTimeoutSecs": 120,
+      "tools": ["predict"],
+      "enabled": false
+    },
+
+    // An already-running service speaking POST /v1/systemone. onesystem does not start it.
+    "rev": {
+      "transport": "systemone-http",
+      "baseUrl": "http://127.0.0.1:8000",
+      "startupTimeoutSecs": 30,
+      "enabled": false
+    }
+  }
+}

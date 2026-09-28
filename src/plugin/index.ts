@@ -284,9 +284,12 @@ export default Plugin.define({
     return async () => {
       // Registration only. The daemon is shared and outlives any single session; see
       // the note at the top of this file.
+      //
+      // Silent. This runs on every session close, so it is the one line that would appear
+      // in every opencode log forever, and it says nothing the reader can act on: the
+      // daemon staying up is the documented behaviour, not news.
       await recovery?.dispose().catch(() => {})
       await registration.dispose().catch(() => {})
-      log("registration disposed; daemon left running")
     }
   },
 })

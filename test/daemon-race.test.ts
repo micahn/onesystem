@@ -269,9 +269,15 @@ describe("the start/exit-code contract", () => {
     // The plugin's whole source of truth. It used to build this URL from a default port
     // and an environment variable no daemon module reads, so a user who set `port` in the
     // config got an MCP server pointing at a port nothing was listening on.
+    //
+    // Written as `.jsonc` because that is the name the loader prefers. This used to
+    // assert `configCandidates[0] === configPath`, which only held while there was one
+    // candidate; with `.json` kept as a fallback there are three, and the assertion was
+    // really asking "is the config that got loaded the first one?", which `config` below
+    // already answers directly.
     const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
     dirs.push(dir)
-    const configPath = join(dir, "onesystem.json")
+    const configPath = join(dir, "onesystem.jsonc")
     await Bun.write(
       configPath,
       JSON.stringify({
@@ -298,8 +304,47 @@ describe("the start/exit-code contract", () => {
     }
     expect(status.url).toBe("http://127.0.0.1:9999")
     expect(status.config).toBe(configPath)
-    expect(status.configCandidates[0]).toBe(configPath)
+    // The reported config has to be one the plugin was told to look for, or a reader
+    // cannot tell whether the address came from their file or from the bundled example.
+    expect(status.configCandidates).toContain(configPath)
     // The prefix survives the trip. The plugin used to receive it and drop it.
     expect(status.registrations[0]).toMatchObject({ backend: "mine", serverName: "onesystem", toolPrefix: "mine_" })
+  }, 20_000)
+
+  test("a config named .json still loads, and .jsonc wins when both exist", async () => {
+    // `.json` is a fallback, not a deprecated path nobody should use, so it needs to keep
+    // working for anyone who wrote one before the rename. The risk is silent: a config
+    // that stops being found does not fail, the bundled example answers instead, and the
+    // user gets a port and a backend set they never wrote.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
+    dirs.push(dir)
+    const env = { ONESYSTEM_CONFIG_DIR: dir, ONESYSTEM_STATE_DIR: dir }
+    const body = (port: number) => JSON.stringify({ port, backends: {} })
+
+    const read = async (): Promise<{ url: string; config: string }> => {
+      const out = await new Promise<string>((resolve) => {
+        const child = spawn(process.execPath, [CLI, "status"], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "ignore"] })
+        let stdout = ""
+        child.stdout?.on("data", (d) => (stdout += String(d)))
+        child.on("close", () => resolve(stdout))
+      })
+      return JSON.parse(out)
+    }
+
+    const jsonPath = join(dir, "onesystem.json")
+    const jsoncPath = join(dir, "onesystem.jsonc")
+
+    // Only .json present: it has to be found, or the port below is the bundled example's.
+    await Bun.write(jsonPath, body(7101))
+    let status = await read()
+    expect(status.config).toBe(jsonPath)
+    expect(status.url).toBe("http://127.0.0.1:7101")
+
+    // Both present: .jsonc is preferred, so a user who has migrated is not still served
+    // the file they replaced.
+    await Bun.write(jsoncPath, body(7102))
+    status = await read()
+    expect(status.config).toBe(jsoncPath)
+    expect(status.url).toBe("http://127.0.0.1:7102")
   }, 20_000)
 })
