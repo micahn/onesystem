@@ -16,7 +16,7 @@ import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
 import { pluginAutoloadFiles, repairConfig, switchToBackend, writeBackend } from "./config-edit.ts"
-import { findModel, MODELS } from "./models.ts"
+import { findModel, modelFor, MODELS } from "./models.ts"
 import {
   backendFor,
   configHint,
@@ -306,6 +306,32 @@ async function cmdDoctor(args: string[]): Promise<number> {
     return bad === 0 ? 0 : 1
   }
   for (const name of targets) {
+    // A cloned model brings its own environment, and there is no torch in it to check.
+    // Its own tooling knows what it can use, so ask it.
+    const spec = modelFor(name)
+    if (spec?.clone) {
+      const dir = join(runtimeDir(name), spec.clone.entry)
+      if (!existsSync(dir)) {
+        bad++
+        process.stdout.write(`${name}: FAILED\n  - not installed: ${dir} is missing\n`)
+        continue
+      }
+      const doctor = spec.clone.doctor ?? [dir, "devices"]
+      const res = await run(doctor[0]!, doctor.slice(1), { cwd: runtimeDir(name), timeoutMs: 60_000 })
+      if (res.code !== 0) {
+        bad++
+        process.stdout.write(`${name}: FAILED\n  - \`${doctor.join(" ")}\` exited ${res.code}\n`)
+        continue
+      }
+      // Report what it chose, since that is the answer to "will this work here".
+      const chosen = /"auto_selects":\s*"([^"]+)"/.exec(res.stdout)?.[1]
+      const device = /"description":\s*"([^"]+)"/.exec(res.stdout)?.[1]
+      process.stdout.write(
+        `${name}: ok${chosen ? ` (${device ?? chosen}${chosen !== device ? `, auto-selects ${chosen}` : ""})` : ""}\n`,
+      )
+      continue
+    }
+
     const check = await verify(runtimeDir(name), gpu, run)
     if (check.ok) {
       process.stdout.write(`${name}: ok${check.torch ? ` (torch ${check.torch})` : ""}\n`)

@@ -14,6 +14,7 @@ import {
 } from "../src/install.ts"
 import { validate } from "../src/config.ts"
 import { findModel, MODELS } from "../src/models.ts"
+import type { ServeBackend, StdioBackend } from "../src/backend/spec.ts"
 
 const amd = { vendor: "amd", gfx: "gfx1201" } as const
 
@@ -153,10 +154,28 @@ describe("the model table", () => {
     expect(() => findModel("nope")).toThrow(/laya/)
   })
 
-  test("every model pins an exact requirement and a python range", () => {
+  test("every resolved model pins an exact requirement and a python range", () => {
     for (const m of MODELS) {
+      // A model that declares `clone` is never pip-installed by onesystem -- its own
+      // tooling builds the environment from its own lock file -- so requiring a
+      // requirement of it would be asking for a field nothing reads.
+      if (m.clone) {
+        expect(`${m.name}: ${m.requirement}`).toBe(`${m.name}: undefined`)
+        continue
+      }
       expect(m.requirement).toMatch(/==\d+\.\d+\.\d+/)
       expect(m.requiresPython).toMatch(/^>=\d+\.\d+/)
+    }
+  })
+
+  test("a cloned model pins the repo and the steps that build it", () => {
+    for (const m of MODELS) {
+      if (!m.clone) continue
+      expect(m.clone.repo).toMatch(/^https:\/\/github\.com\//)
+      expect(m.clone.sync[0]).toBe("uv")
+      // The entry is what a config block names as the program, so it has to be the path
+      // inside the clone that the build actually leaves behind.
+      expect(m.clone.entry).toMatch(/^\.venv\/bin\//)
     }
   })
 })
@@ -184,6 +203,16 @@ describe("the config block an install produces", () => {
     return { spec, backend, doc: { port: 7331, backends: { [name]: backend } } }
   }
 
+  /**
+   * The block for a model onesystem launches, as opposed to one it forwards to. Only the
+   * first kind carries a `command` that onesystem chose.
+   */
+  const launched = async (name: string) => {
+    const { backend } = await loads(name)
+    if (!("command" in backend)) throw new Error(`${name} is forwarded to a service, not launched`)
+    return backend as StdioBackend | ServeBackend
+  }
+
   test("it produces a backend the validator accepts, for every model", async () => {
     for (const m of MODELS) {
       const { spec, doc } = await loads(m.name)
@@ -201,7 +230,7 @@ describe("the config block an install produces", () => {
     // The one output whose entire purpose is to contain no placeholders used to emit
     // `["/path/to/shim"]` for a model with no local weights.
     for (const m of MODELS) {
-      const { backend } = await loads(m.name)
+      const backend = await launched(m.name)
       expect(`${m.name}: ${JSON.stringify(backend.command)}`).not.toContain("/path/to/shim")
     }
   })
@@ -210,7 +239,7 @@ describe("the config block an install produces", () => {
     // laya's runtime in this test does not exist, so there is no `laya-mcp-server` to find.
     // The fallback has to be an obvious gap rather than a plausible-looking path, because a
     // `command` naming a missing file fails at the first tool call rather than at startup.
-    const { backend } = await loads("laya")
+    const backend = await launched("laya")
     expect(needsManualCommand(backend)).toBe(true)
     expect(backend.command[0]).toMatch(/^REPLACE: /)
     expect(backend.command[0]).toContain("laya")
@@ -219,7 +248,7 @@ describe("the config block an install produces", () => {
   test("a model that ships a library points at this repo's shim", async () => {
     // julia has no server of its own, so the command is fully determined and must not
     // leave a person guessing.
-    const { backend } = await loads("julia")
+    const backend = await launched("julia")
     expect(backend.command[1]).toMatch(/shims[\\/]julia-mcp\.py$/)
     expect(backend.command[0]).toBe("/data/runtimes/julia/.venv/bin/python")
     expect(needsManualCommand(backend)).toBe(false)
@@ -229,7 +258,9 @@ describe("the config block an install produces", () => {
     for (const m of MODELS) {
       expect(`${m.name}: ${JSON.stringify(m.tools)}`).not.toMatch(/: undefined/)
       const { backend } = await loads(m.name)
-      expect(backend.tools).toEqual([...(m.tools ?? [])])
+      // Every variant declares its tool surface, including the forwarded one, so /catalog
+      // answers the same way whichever transport is in use.
+      expect("tools" in backend ? backend.tools : []).toEqual([...(m.tools ?? [])])
     }
   })
 
@@ -249,7 +280,7 @@ describe("the config block an install produces", () => {
     // Weights are fetched outside the runtime so a reinstall does not take them with it, so
     // the path here is the weights directory and not the runtime that sits next to it.
     const { backend } = await loads("julia")
-    expect(backend.env?.JULIA_CHECKPOINT).toMatch(/weights[\\/]julia$/)
+    expect("env" in backend ? backend.env?.JULIA_CHECKPOINT : undefined).toMatch(/weights[\\/]julia$/)
   })
 
   test("the printed block is the written block, rendered", async () => {
@@ -266,9 +297,60 @@ describe("the config block an install produces", () => {
   })
 
   test("the printed block is valid JSON, so a paste cannot half-work", async () => {
-    const { backend } = await loads("laya")
+    const backend = await launched("laya")
     const text = configHint(findModel("laya"), runtimeFor("laya"), backend)
     // It shipped unquoted once, which meant the one output meant for pasting was not JSON.
     expect(() => JSON.parse(text.replace(/^\s*"\w+":\s*/, ""))).not.toThrow()
+  })
+})
+
+describe("tool names a client can tell apart", () => {
+  test("no two models publish the same unprefixed tool name", () => {
+    // laya, julia and rizzo all publish `predict`. With prefixes applied they are
+    // `laya_predict`, `julia_predict` and `rizzo_predict`; without one, two of them are
+    // literally the same tool name and a client cannot tell which answered.
+    const seen = new Map<string, string[]>()
+    for (const m of MODELS) {
+      const prefix = m.toolPrefix ? `${m.toolPrefix}_` : ""
+      for (const tool of m.tools ?? []) {
+        const name = prefix + tool
+        seen.set(name, [...(seen.get(name) ?? []), m.name])
+      }
+    }
+    for (const [name, owners] of seen) {
+      expect(`${name}: ${owners.join(",")}`).toBe(`${name}: ${owners[0]}`)
+    }
+  })
+
+  test("so every model with more than one peer publishing a tool declares a prefix", () => {
+    // A weaker but more actionable statement of the same thing: any model sharing a bare
+    // tool name with another has to distinguish itself.
+    const bare = new Map<string, string[]>()
+    for (const m of MODELS) {
+      if (m.toolPrefix) continue
+      for (const tool of m.tools ?? []) bare.set(tool, [...(bare.get(tool) ?? []), m.name])
+    }
+    for (const [tool, owners] of bare) {
+      expect(`${tool} shared by ${owners.join(",")}`).toBe(`${tool} shared by ${owners[0]}`)
+    }
+  })
+
+  test("the prefix is emitted by install, not left in a config file", async () => {
+    // It used to live only in the shipped template and survived by accident, because
+    // writeBackend merges. A fresh install of a model whose template said nothing would
+    // publish an unprefixed name.
+    const dir = (name: string) => ({
+      name,
+      dir: `/data/runtimes/${name}`,
+      python: `/data/runtimes/${name}/.venv/bin/python`,
+      installed: true,
+    })
+    for (const m of MODELS) {
+      if (!m.toolPrefix) continue
+      const backend = await backendFor(m, dir(m.name))
+      expect(`${m.name}: ${"toolPrefix" in backend ? backend.toolPrefix : null}`).toBe(
+        `${m.name}: ${m.toolPrefix}_`,
+      )
+    }
   })
 })

@@ -8,11 +8,11 @@
 
 import { chmod, mkdir, open, readFile, readdir, rename, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import { DEFAULT_TIMEOUT_MS, type Runner } from "./subprocess.ts"
 import type { ModelSpec } from "./models.ts"
-import type { StdioBackend } from "./backend/spec.ts"
+import type { BackendSpec, StdioBackend } from "./backend/spec.ts"
 
 /**
  * PyTorch's ROCm index. AMD's smaller multi-arch distribution needs source pins
@@ -121,12 +121,17 @@ export function pyprojectFor(spec: ModelSpec, gpu: Gpu): string {
   // SDK, because the shim that puts it behind a tool surface runs inside this
   // interpreter and nowhere else.
   const extra = spec.needsMcp ? ["mcp"] : []
-  const requirement = local ? spec.requirement.replace(/==.*/, "") : spec.requirement
-  const declared = [requirement, ...extra]
+  // Only the resolved path reaches here; a cloned model returns before any of this.
+  // `pinned` is the versioned form, for `dependencies`. `named` is the bare package name,
+  // which is what `[tool.uv.sources]` keys on -- confusing the two breaks resolution, and
+  // uv's error for it does not name the key.
+  const pinned = spec.requirement!
+  const named = local ? pinned.replace(/==.*/, "") : pinned
+  const declared = [named, ...extra]
 
   // Both GPU branches need the local source for packages absent from PyPI.
   const localSource = local
-    ? `\n[tool.uv.sources]\n${requirement} = { path = "${local}" }\n`
+    ? `\n[tool.uv.sources]\n${named} = { path = "${local}" }\n`
     : ""
 
   if (gpu.vendor !== "amd") {
@@ -160,7 +165,7 @@ ${declared.map((d) => `  "${d}",`).join("\n")}
 environments = ["sys_platform == 'linux'"]
 
 [tool.uv.sources]
-${local ? `${requirement} = { path = "${local}" }
+${local ? `${named} = { path = "${local}" }
 ` : ""}torch = { index = "${ROCM_INDEX.name}" }
 triton-rocm = { index = "${ROCM_INDEX.name}" }
 pytorch-triton-rocm = { index = "${ROCM_INDEX.name}" }
@@ -241,6 +246,11 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
   const say = options.onProgress ?? (() => {})
   say(`installing ${spec.name} for ${gpu.gfx ?? gpu.vendor} into ${dir}`)
 
+  // A model that brings its own environment takes a different path end to end: no manifest,
+  // no lock resolution, no torch, and no weights fetched by us. Every step of the resolved
+  // path below would either be meaningless or actively wrong for it.
+  if (spec.clone) return installClone(spec, dir, options)
+
   // Built in place and moved into position at the end, so a killed run never leaves a
   // directory that looks installed.
   const staging = `${dir}.partial`
@@ -302,6 +312,63 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
     await rm(staging, { recursive: true, force: true }).catch(() => {})
     throw err
   }
+}
+
+/**
+ * Clone a repository and let its own tooling build the environment.
+ *
+ * The runtime directory is the clone. Its virtualenv holds absolute paths, so it cannot be
+ * assembled in a staging directory and renamed into place, and a service like this resolves
+ * its own weights relative to where it was started. That leaves a half-install behind on
+ * failure, which `runtimes` already reports as not installed.
+ *
+ * No torch check, and that is not a gap: the model brought its own dependency set, and
+ * checking torch against it would be checking a project we do not control for a library it
+ * may never have heard of.
+ */
+async function installClone(spec: ModelSpec, dir: string, options: InstallOptions): Promise<Runtime> {
+  const { runner, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  const { repo, sync, prepare, entry } = spec.clone!
+  const say = options.onProgress ?? (() => {})
+
+  if (!(await have("git", runner))) {
+    throw new Error("git is not on PATH, and a cloned model is installed by cloning it.")
+  }
+  await rm(dir, { recursive: true, force: true })
+  // The directory itself, not just its parent: `git clone repo .` runs with `dir` as its
+  // cwd, and a cwd that does not exist is a spawn failure that reads like a missing git.
+  await mkdir(dir, { recursive: true })
+
+  say(`cloning ${repo}`)
+  const clone = await runner("git", ["clone", "--depth", "1", repo, "."], { cwd: dir, timeoutMs })
+  if (clone.timedOut) throw new Error(`git clone did not finish within ${timeoutMs}ms`)
+  if (clone.code !== 0) throw new Error(`git clone failed:\n${clone.stderr.trim()}`)
+
+  const step = async (argv: readonly string[], what: string) => {
+    say(`${what}: ${argv.join(" ")}`)
+    const res = await runner(argv[0]!, argv.slice(1), { cwd: dir, timeoutMs })
+    if (res.timedOut) throw new Error(`${what} did not finish within ${timeoutMs}ms`)
+    if (res.code !== 0) throw new Error(`${what} failed:\n${res.stderr.trim().slice(-600)}`)
+  }
+  await step(sync, "building the environment")
+  if (prepare) await step(prepare, "fetching what the service needs")
+
+  const entryPath = join(dir, entry)
+  if (!existsSync(entryPath)) {
+    throw new Error(
+      `${spec.name} did not leave the console script ${entry} where it was expected (${entryPath}). ` +
+        `Its build step may have changed.`,
+    )
+  }
+
+  // Only now is the directory a runtime. Until this write, `runtimes` calls it a half-install.
+  const revision = (await runner("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim() || undefined
+  await writeFile(
+    join(dir, "meta.json"),
+    JSON.stringify({ model: spec.name, created: new Date().toISOString(), revision, cloned: repo }, null, 2),
+  )
+  say("installed")
+  return { name: spec.name, dir, python: pythonIn(dir), installed: true }
 }
 
 /**
@@ -491,7 +558,7 @@ export async function uninstall(name: string): Promise<boolean> {
  * the installed entryPoint, then this repo's shim, then an explicit REPLACE marker.
  * Use declared tools so config generation does not start a model.
  */
-export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<StdioBackend> {
+export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<BackendSpec> {
   // `tools` is optional on the type but required for a config to load: `validate` rejects
   // an empty list, so a model declaring none would produce a block that cannot be used.
   // That is a gap in the model table, not something to paper over here.
@@ -500,6 +567,27 @@ export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<Std
       `cannot write a config block for ${spec.name}: it declares no tools, and they cannot be ` +
         `discovered without loading the model. Add \`tools\` to its ModelSpec in src/models.ts.`,
     )
+  }
+
+  // A cloned model ships a server rather than a library, so the block is a transport that
+  // launches it. The `cwd` is the clone: the service resolves its own weights relative to
+  // where it was started, so a block without it starts a service that finds nothing.
+  if (spec.clone) {
+    const entry = join(runtime.dir, spec.clone.entry)
+    return {
+      transport: "systemone-serve",
+      command: [entry, "serve"],
+      cwd: runtime.dir,
+      baseUrl: spec.clone.baseUrl ?? "http://127.0.0.1:8017",
+      healthPath: "/health",
+      systemonePath: "/v1/systemone",
+      model: spec.clone.model ?? "latest",
+      // Under the request ceiling deliberately: a cold start is spent inside one call, and
+      // `validate` refuses a startup budget the ceiling cannot reach.
+      startupTimeoutSecs: 120,
+      ...(spec.toolPrefix ? { toolPrefix: `${spec.toolPrefix}_` } : {}),
+      tools: [...spec.tools],
+    }
   }
 
   const command = await resolveCommand(spec, runtime)
@@ -514,6 +602,7 @@ export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<Std
     // Generous because laya's server is silent for ~30s importing transformers before it
     // binds stdio. See stdio-mcp.ts.
     startupTimeoutSecs: 180,
+    ...(spec.toolPrefix ? { toolPrefix: `${spec.toolPrefix}_` } : {}),
     tools: [...spec.tools],
   }
 }
@@ -534,14 +623,14 @@ async function resolveCommand(spec: ModelSpec, runtime: Runtime): Promise<string
 }
 
 /** True when `backendFor` produced something a person still has to fill in. */
-export function needsManualCommand(backend: StdioBackend): boolean {
-  return backend.command.some((arg) => arg.startsWith("REPLACE:"))
+export function needsManualCommand(backend: BackendSpec): boolean {
+  return "command" in backend && backend.command.some((arg) => arg.startsWith("REPLACE:"))
 }
 
 /**
  * Render the same backend object for --no-config or a failed config write.
  */
-export function renderBackend(name: string, backend: StdioBackend): string {
+export function renderBackend(name: string, backend: BackendSpec): string {
   const lines = JSON.stringify(backend, null, 2).split("\n")
   const inner = lines
     .slice(1, -1)
@@ -551,7 +640,7 @@ export function renderBackend(name: string, backend: StdioBackend): string {
 }
 
 /** Print a backend built by `backendFor`. */
-export function configHint(spec: ModelSpec, runtime: Runtime, backend?: StdioBackend): string {
+export function configHint(spec: ModelSpec, runtime: Runtime, backend?: BackendSpec): string {
   // `backend` is passed by `onesystem install` so the printed form is the resolved one,
   // entry point and all. The fallback re-derives the marker form for the rare caller that
   // only has a spec and a runtime.

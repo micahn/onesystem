@@ -162,6 +162,9 @@ Most of it is editable from inside OpenCode with the `/onesystem` menu.
 ### Backends and tools
 
 - `stdio-mcp`: onesystem starts and stops a local MCP process. Used by laya and julia.
+- `systemone-serve`: the same `POST /v1/systemone` wire shape, for a service onesystem
+  launches itself rather than one already running. Spawns it, polls `GET /health` until
+  `{"status":"ready"}`, and stops it on idle. Used by rizzo.
 - `systemone-http`: forwards a `systemone` tool to an existing `POST /v1/systemone`
   service. Add one to your own config if you have such a service; it is not in the shipped
   template, since a disabled entry in everyone's config is not a feature. Start the service
@@ -301,9 +304,12 @@ AMD RX 9070 XT (gfx1201), ROCm 6.4 driver, ROCm 7.2 PyTorch wheel, laya 0.3.21:
 | --- | --- |
 | Install laya, warm uv cache | ~10 s; ~8 min when the venv is gone |
 | Install julia, including 585 MB of weights | ~46 s |
+| Install rizzo: clone, `uv sync`, runtime + 4.4 GB of weights | ~5 min |
 | Start daemon, no model loaded | ~190 ms |
 | First tool call | laya ~13.7 s; julia ~15.7 s |
 | Warm tool call | Tens of milliseconds |
+| rizzo, cold call (spawn through ready to answer) | ~5-7 s |
+| rizzo, warm call | ~0.2 s |
 | Both models loaded | 6.6 GB VRAM |
 
 Cold calls spend most of their time importing `transformers`.
