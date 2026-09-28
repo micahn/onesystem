@@ -41,7 +41,15 @@ export interface RoutingConfig {
 export interface RoutingDecision {
   /** Backend for an unqualified call. */
   preferred: string
-  /** Server name for the preferred backend: the bare `onesystem`. */
+  /**
+   * Server name for the preferred backend — the one `config.registrations` decided.
+   *
+   * This used to be the literal `"onesystem"`, hardcoded, while the same backend was
+   * registered as `onesystem-laya` by the module that owns the question. With two backends
+   * and routing on, the three modules disagreed about one backend's name and nothing
+   * noticed. It is now read from the registrations rather than recomputed, so this field
+   * cannot name a server that does not exist.
+   */
   preferredServerName: string
   /** Every other backend, qualified, in a stable order. */
   others: { backend: string; serverName: string }[]
@@ -56,9 +64,18 @@ export function isEnabled(routing: RoutingConfig | undefined, backendCount: numb
 }
 
 /**
- * Work out the server names, or null when routing is off.
+ * Work out which backend is preferred, or null when routing is off.
  *
- * `backends` is the list from `onesystem status`, already filtered to enabled ones.
+ * `backends` is the list from `onesystem status`: the registrations, which already carry
+ * the server names. Every name below is read from it. This function decides *which backend
+ * answers* and nothing else — naming is `naming.ts`'s job, and a second opinion here is
+ * what produced three names for one backend.
+ *
+ * The deletion test for this module is worth recording, since it was raised while fixing
+ * it: everything here lands in one caller, so the module is not paying for its interface so
+ * much as for its tests. It is kept because the declared default and the task guidance are
+ * a user-facing feature with no other home, and a N=1 module is a smell rather than a
+ * verdict.
  */
 export function resolve(
   routing: RoutingConfig | undefined,
@@ -70,13 +87,16 @@ export function resolve(
   // Fall back to the first registered rather than refusing to start. A config naming a
   // backend that is not enabled is a typo, and the daemon should still come up.
   const preferred = backends.find((b) => b.backend === wanted) ?? backends[0]!
+  // Straight from the registrations. Not `` `onesystem-${b.backend}` `` — that spelling is
+  // what discarded a configured `serverName` and disagreed with `registrations` about a
+  // backend that had been named explicitly.
   const others = backends
     .filter((b) => b.backend !== preferred.backend)
-    .map((b) => ({ backend: b.backend, serverName: `onesystem-${b.backend}` }))
+    .map((b) => ({ backend: b.backend, serverName: b.serverName }))
 
   const guidance = Object.entries(routing!.tasks ?? {}).map(
     ([task, model]) => `  ${task}: ${model}`,
   )
 
-  return { preferred: preferred.backend, preferredServerName: "onesystem", others, guidance }
+  return { preferred: preferred.backend, preferredServerName: preferred.serverName, others, guidance }
 }

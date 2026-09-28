@@ -32,6 +32,7 @@
 
 import type { Plugin } from "@opencode/plugin"
 import { healthy } from "../health.ts"
+import { planNames, type NameCandidate } from "../naming.ts"
 import { run } from "./discover.ts"
 
 export interface CatalogEntry {
@@ -58,14 +59,37 @@ export interface JsonTool {
  * a hypothetical `julia_predict` both become `predict` and a caller cannot tell which
  * model will answer. That is deliberate for a single model and wrong for two, so with more
  * than one backend the name is qualified and the agent picks.
+ *
+ * Which backends are qualified is not decided here. `naming.planNames` answers it, once,
+ * for the server names and the tool names together, and this function supplies it with the
+ * candidates. It used to re-derive the rule with a third spelling — `usable.length === 1 ?
+ * bare : entry.backend === routingDefault ? bare : qualified` — which meant "which backend
+ * is unqualified" had three implementations in the codebase and the routing one disagreed
+ * with the other two about names. Asking instead of deriving is also what makes the
+ * property test in `test/naming.test.ts` writable: there is finally a single answer to
+ * compare against.
+ *
+ * `candidates` is the daemon's registrations, and it is consulted only for which backends
+ * exist — a configured backend that is down must not count towards "more than one". With
+ * two configured and one unreachable, the one that can still answer keeps the clean
+ * `predict` name rather than being pushed to `laya_predict` by a backend that is not there.
+ * That is why `planNames` is asked about the *usable* set below, and not about whatever
+ * was configured.
  */
-export function planTools(catalog: Catalog, routingDefault?: string): {
+export function planTools(catalog: Catalog, candidates?: NameCandidate[], preferred?: string): {
   tools: { name: string; backend: string; tool: string; description: string; inputSchema: unknown }[]
   unreachable: { backend: string; error: string }[]
 } {
   const tools: { name: string; backend: string; tool: string; description: string; inputSchema: unknown }[] = []
   const unreachable: { backend: string; error: string }[] = []
   const usable = catalog.backends.filter((b) => !b.error && (b.tools?.tools?.length ?? 0) > 0)
+
+  // Usable, and known to the daemon. Falling back to the catalog alone keeps this callable
+  // without registrations, which is the shape the plugin tests use.
+  const answerable = candidates
+    ? candidates.filter((c) => usable.some((u) => u.backend === c.backend))
+    : usable.map((u) => ({ backend: u.backend }))
+  const bare = new Set(planNames(answerable, preferred).filter((n) => n.bare).map((n) => n.backend))
 
   for (const entry of catalog.backends) {
     if (entry.error) {
@@ -74,25 +98,19 @@ export function planTools(catalog: Catalog, routingDefault?: string): {
     }
     for (const t of entry.tools?.tools ?? []) {
       if (typeof t.name !== "string") continue
-      const bare = entry.toolPrefix && t.name.startsWith(entry.toolPrefix)
+      const stripped = entry.toolPrefix && t.name.startsWith(entry.toolPrefix)
         ? t.name.slice(entry.toolPrefix.length)
         : t.name
       // With one model, `predict` is the name. With several, an unqualified name would
-      // make two models claim one tool, so the preferred model keeps the bare name and
-      // the rest are qualified.
-      const name =
-        usable.length === 1
-          ? bare
-          : entry.backend === routingDefault
-            ? bare
-            : `${entry.backend}_${bare}`
+      // make two models claim one tool, so only a declared preferred backend keeps it.
+      const name = bare.has(entry.backend) ? stripped : `${entry.backend}_${stripped}`
       tools.push({
         name,
         backend: entry.backend,
         // The daemon strips its own prefix on the way out and restores it on the way in,
         // so the wire name is always the model's own.
         tool: t.name,
-        description: t.description ?? `${entry.backend} ${bare}`,
+        description: t.description ?? `${entry.backend} ${stripped}`,
         inputSchema: t.inputSchema ?? { type: "object", additionalProperties: true },
       })
     }
@@ -166,13 +184,14 @@ export async function registerTools(
     }
   },
   base: string,
-  routingDefault: string | undefined,
+  candidates: NameCandidate[] | undefined,
+  preferred: string | undefined,
   catalogTimeoutMs = 10_000,
 ): Promise<{ dispose: () => Promise<void>; names: string[]; unreachable: { backend: string; error: string }[] }> {
   const catalog = await readCatalog(base, catalogTimeoutMs)
   if (!catalog) throw new Error(`could not read the tool catalog from ${base}/catalog`)
 
-  const { tools, unreachable } = planTools(catalog, routingDefault)
+  const { tools, unreachable } = planTools(catalog, candidates, preferred)
   for (const u of unreachable) {
     // Logged rather than thrown: one backend being down should not cost the session the
     // tools of the others.

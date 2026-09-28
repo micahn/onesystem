@@ -20,6 +20,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import type { HealthReport } from "./health.ts"
+import { planNames } from "./naming.ts"
 import type { Holder as LockHolder } from "./lock.ts"
 import type { RoutingConfig } from "./routing.ts"
 
@@ -197,18 +198,31 @@ export interface BackendRegistration {
  * Lives here rather than in the plugin so the plugin does not have to re-derive it,
  * and so `onesystem status` can report the same names the plugin will actually use.
  * A mismatch there is the kind of thing that is only noticed when a tool is missing.
+ *
+ * The rule itself is in `naming.ts`, because this is no longer the only place that needs
+ * it: the routing decision and the tool-name plan were each deriving a name independently,
+ * and `routing.resolve` was inventing `onesystem` for a backend this function had already
+ * named `onesystem-laya`. One rule, three readers.
+ *
+ * No `preferred` is passed, deliberately. A server name does not depend on which backend
+ * is the routing default — that affects which *tools* are bare, not what the server is
+ * called — so `onesystem status` reports the same names whether routing is on or off, and
+ * cannot drift because of it.
  */
 export function registrations(config: Config): BackendRegistration[] {
   const enabled = Object.entries(config.backends).filter(([, spec]) => spec.enabled !== false)
-  const single = enabled.length === 1
-  return enabled.map(([backend, spec]) => ({
-    backend,
-    // One backend gets the clean name. Several cannot all be `onesystem`, so the rest
-    // are qualified rather than silently overwriting each other in opencode's registry.
-    serverName: spec.serverName ?? (single ? "onesystem" : `onesystem-${backend}`),
-    toolPrefix: spec.toolPrefix,
-    transport: spec.transport,
-  }))
+  const planned = planNames(enabled.map(([backend, spec]) => ({ backend, serverName: spec.serverName })))
+  return planned.map((name) => {
+    const spec = config.backends[name.backend]!
+    return {
+      backend: name.backend,
+      // One backend gets the clean name. Several cannot all be `onesystem`, so the rest
+      // are qualified rather than silently overwriting each other in opencode's registry.
+      serverName: name.serverName,
+      toolPrefix: spec.toolPrefix,
+      transport: spec.transport,
+    }
+  })
 }
 
 /** Where a bundled example lives, used when the user has no config yet. */

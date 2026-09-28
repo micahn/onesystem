@@ -41,10 +41,28 @@ describe("when it is on", () => {
   test("the default gets the bare name, so an unqualified call reaches it", () => {
     const r = resolve({ enabled: true, default: "julia" }, both)!
     expect(r.preferred).toBe("julia")
-    // This is the whole mechanism: the agent says `onesystem.predict`, and the bare name
-    // is what resolves to the chosen model.
-    expect(r.preferredServerName).toBe("onesystem")
+    // The name is the one the daemon registered, read back out of the registrations rather
+    // than recomputed. This used to be asserted as the literal `"onesystem"`, which is the
+    // bug: `registrations` had named this backend `onesystem-julia`, so the routing
+    // decision was reporting a server that did not exist, and the test recorded that as
+    // the expected answer. A routing decision that names a server nobody registered is
+    // exactly the "a tool is missing and nothing says why" case `registrations` exists to
+    // prevent.
+    expect(r.preferredServerName).toBe("onesystem-julia")
     expect(r.others).toEqual([{ backend: "laya", serverName: "onesystem-laya" }])
+  })
+
+  test("every name it reports came from the registrations, verbatim", () => {
+    // The property, stated once. `resolve` used to build `others` with a hardcoded
+    // template, so a config with `serverName: "decisions"` was reported correctly by
+    // `onesystem status` and silently rewritten here.
+    const renamed = [
+      { backend: "laya", serverName: "decisions" },
+      { backend: "julia", serverName: "onesystem-julia" },
+    ]
+    const r = resolve({ enabled: true, default: "laya" }, renamed)!
+    expect(r.preferredServerName).toBe("decisions")
+    expect(r.others).toEqual([{ backend: "julia", serverName: "onesystem-julia" }])
   })
 
   test("a default naming a backend that is not enabled falls back rather than failing", () => {

@@ -47,6 +47,7 @@
 
 import { Plugin } from "@opencode/plugin"
 import { healthy } from "../health.ts"
+import { planNames } from "../naming.ts"
 import { resolve as resolveRouting } from "../routing.ts"
 import { askDaemon, defaultCli, pluginLog, run } from "./discover.ts"
 import { registerTools } from "./tools.ts"
@@ -184,7 +185,17 @@ export default Plugin.define({
     // service rather than one per model.
     let registration: { dispose(): Promise<void>; names: string[]; unreachable: { backend: string; error: string }[] }
     try {
-      registration = await registerTools(ctx, base, route?.preferred, CATALOG_TIMEOUT_MS)
+      // The registrations and the preferred backend, handed straight through.
+      //
+      // The preferred used to travel as a bare string from `routing.resolve` through
+      // `registerTools` into `planTools`, which re-derived the rule for which backends get
+      // bare tool names -- a third implementation of a question `config.registrations` had
+      // already answered for the server names, and the one that disagreed with the other
+      // two about names. `planTools` asks `naming.planNames` now, which is also what makes
+      // the property test in `test/naming.test.ts` writable: there is finally a single
+      // answer for the other two modules to be compared against.
+      const candidates = configured.map((r) => ({ backend: r.backend, serverName: r.serverName }))
+      registration = await registerTools(ctx, base, candidates, route?.preferred, CATALOG_TIMEOUT_MS)
     } catch (err) {
       log("could not register tools", { error: String(err) })
       return async () => {}
