@@ -24,6 +24,10 @@ function backend(over: Partial<BackendStatus> = {}): BackendStatus {
     errors: 0,
     lastMs: null,
     meanMs: null,
+    inBytes: 0,
+    outBytes: 0,
+    answered: 0,
+    byType: {},
     ...over,
   }
 }
@@ -105,6 +109,30 @@ describe("the detail view", () => {
   test("a model with no failures does not mention failures", () => {
     const out = statusReport(report(backend({ calls: 1, errors: 0 })), null)
     expect(out).not.toContain("failed")
+  })
+
+  test("volume is shown in bytes and answered questions, not tokens", () => {
+    const out = statusReport(
+      report(
+        backend({
+          calls: 3,
+          answered: 5,
+          byType: { choice: 4, noul: 1 },
+          inBytes: 2048,
+          outBytes: 1_500_000,
+          lastMs: 12,
+          meanMs: 30,
+        }),
+      ),
+      null,
+    )
+    expect(out).toContain("5 answered (4 choice, 1 noul)")
+    expect(out).toContain("2.0KB in / 1.4MB out")
+    expect(out).not.toMatch(/token/i)
+  })
+
+  test("a model with nothing answered shows a zero rather than a blank", () => {
+    expect(statusReport(report(backend({ calls: 2, answered: 0, byType: {} })), null)).toContain("0 answered")
   })
 
   test("a daemon that is not running says so plainly", () => {

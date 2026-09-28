@@ -78,7 +78,7 @@ export class SystemOneBackendImpl implements Backend {
   call(ctx: CallContext): Promise<unknown> {
     // Wrapped rather than awaited, so one place times the whole call including the
     // unsupported-method and unknown-tool rejections above, which are errors the user sees.
-    return record(this.#usage, () => this.#doCall(ctx), () => this.#now())
+    return record(this.#usage, () => this.#doCall(ctx), () => this.#now(), ctx.params)
   }
 
   async #doCall(ctx: CallContext): Promise<unknown> {

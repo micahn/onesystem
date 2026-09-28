@@ -16,7 +16,7 @@
 
 import type { Backend, BackendState, BackendStatus, CallContext } from "../../src/backend/types.ts"
 import { BackendError } from "../../src/backend/types.ts"
-import { emptyUsage, finish } from "../../src/backend/usage.ts"
+import { byteSize, emptyUsage, finish } from "../../src/backend/usage.ts"
 
 export interface FakeBackendOptions {
   name?: string
@@ -76,14 +76,20 @@ export class FakeBackend implements Backend {
     this.#state = "warm"
     this.#idleMs = 0
     const started = Date.now()
+    this.#usage.inBytes += byteSize(ctx.params)
     try {
       if (ctx.method === "tools/list") {
-        finish(this.#usage, Date.now() - started, false)
+        finish(this.#usage, Date.now() - started, false, { tools: this.#tools })
         return { tools: this.#tools }
       }
       if (this.#fail) throw this.#fail
-      finish(this.#usage, Date.now() - started, false)
-      return this.#result
+      // Shaped like a real answer so the counters have something to count, and the tests
+      // that assert on `answered` are asserting on the same path production uses.
+      const result = this.#result === undefined
+        ? { answers: { q: { type: "choice", choice: "a" } } }
+        : this.#result
+      finish(this.#usage, Date.now() - started, false, result)
+      return result
     } catch (err) {
       finish(this.#usage, Date.now() - started, true)
       throw err
@@ -147,10 +153,7 @@ export class HangingBackend implements Backend {
       inflight: this.#state === "warm" ? ++this.inflightSeen : 0,
       idleMs: 0,
       local: true,
-      calls: 0,
-      errors: 0,
-      lastMs: null,
-      meanMs: null,
+      ...emptyUsage(),
     }
   }
 }

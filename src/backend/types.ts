@@ -88,6 +88,14 @@ export interface BackendStatus {
   lastMs: number | null
   /** Mean wall-clock over every completed call. Null until the first one. */
   meanMs: number | null
+  /** Request bytes sent to the model, cumulatively. */
+  inBytes: number
+  /** Result bytes returned by the model, cumulatively. */
+  outBytes: number
+  /** Questions answered, cumulatively. Zero for a model whose answers are not countable. */
+  answered: number
+  /** Answered questions by type, e.g. `{ choice: 12, noul: 3 }`. */
+  byType: Record<string, number>
 }
 
 export interface Backend {

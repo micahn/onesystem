@@ -230,7 +230,7 @@ export class StdioMcpBackend implements Backend {
         // is what stops the SDK applying its own 60s default, which is shorter than the
         // 120s onesystem is configured for.
         { signal: ctx.signal, timeout: ctx.timeoutMs },
-      ), () => this.#now())
+      ), () => this.#now(), ctx.params)
     } catch (err) {
       if (ctx.signal?.aborted) {
         throw new BackendError(this.name, `${ctx.method} was cancelled: ${describeError(err)}`, err)

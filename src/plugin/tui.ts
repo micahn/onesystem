@@ -49,6 +49,21 @@ const POLL_MS = 4_000
 type Tone = "info" | "success" | "warning" | "error"
 type Line = { text: string; tone: Tone }
 
+/** Bytes as something a person can read at a glance. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${(n / 1024 / 1024).toFixed(1)}MB`
+}
+
+/** " (3 choice, 1 noul)", or nothing when nothing has been answered. */
+function describeTypes(byType: Record<string, number>): string {
+  const parts = Object.entries(byType)
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, n]) => `${n} ${type}`)
+  return parts.length > 0 ? ` (${parts.join(", ")})` : ""
+}
+
 /**
  * The detail view.
  *
@@ -68,6 +83,12 @@ export function statusReport(health: HealthReport | null, base: string | null): 
     lines.push(
       `  ${b.name}  ${b.state}  ${b.calls} calls${b.errors ? `, ${b.errors} failed` : ""}` +
         `  ${ms}${b.inflight ? `  ${b.inflight} in flight` : ""}`,
+    )
+    // Volume, in the two units that are actually measured. Bytes, not tokens: neither
+    // model reports tokens, so a token number would be an estimate next to a real one.
+    lines.push(
+      `    ${b.answered} answered${describeTypes(b.byType)}` +
+        `  ${formatBytes(b.inBytes)} in / ${formatBytes(b.outBytes)} out`,
     )
   }
   lines.push(`idle window ${health.idleShutdownSecs}s`)
