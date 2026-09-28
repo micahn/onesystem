@@ -184,6 +184,117 @@ describe("tool naming across the bridge", () => {
     await mcp.call("tools/call", { name: "decide" })
     expect(fake.calls.at(-1)?.params?.name).toBe("decide")
   })
+
+  test("POST /call takes a bare name, the way /mcp/:backend lists it", async () => {
+    // The reported failure: a client read `predict` from /mcp/laya and posted it to
+    // /call, which forwarded the name verbatim and got back `Unknown tool: predict`.
+    const fake = new FakeBackend({
+      name: "laya",
+      toolPrefix: "laya_",
+      tools: [{ name: "laya_predict" }],
+    })
+    const { url } = await listen(portOf({ laya: fake }))
+
+    const res = await post(`${url}/call`, { backend: "laya", tool: "predict", arguments: { state: {} } })
+    expect(res.status).toBe(200)
+    expect(fake.calls.at(-1)?.params?.name).toBe("laya_predict")
+  })
+
+  test("POST /call still takes the prefixed name /catalog advertises", async () => {
+    const fake = new FakeBackend({
+      name: "laya",
+      toolPrefix: "laya_",
+      tools: [{ name: "laya_predict" }],
+    })
+    const { url } = await listen(portOf({ laya: fake }))
+
+    await post(`${url}/call`, { backend: "laya", tool: "laya_predict", arguments: {} })
+    expect(fake.calls.at(-1)?.params?.name).toBe("laya_predict")
+  })
+
+  test("POST /call passes an unprefixed backend's name through untouched", async () => {
+    const fake = new FakeBackend({ name: "raw", tools: [{ name: "decide" }] })
+    const { url } = await listen(portOf({ raw: fake }))
+
+    await post(`${url}/call`, { backend: "raw", tool: "decide", arguments: {} })
+    expect(fake.calls.at(-1)?.params?.name).toBe("decide")
+  })
+
+  test("a tool the backend does not have is a 404 naming the ones it does", async () => {
+    // `Unknown tool: predict` names the name the client sent and not the one the
+    // process answers to, so the caller cannot tell a typo from a naming mismatch.
+    const fake = new FakeBackend({
+      name: "laya",
+      toolPrefix: "laya_",
+      tools: [{ name: "laya_predict" }, { name: "laya_status" }],
+      fail: new Error("Unknown tool: nope"),
+    })
+    const { url } = await listen(portOf({ laya: fake }))
+
+    const res = await post(`${url}/call`, { backend: "laya", tool: "nope", arguments: {} })
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as { error: string; message: string }
+    expect(body.error).toBe("unknown_tool")
+    expect(body.message).toContain('"laya_predict"')
+    expect(body.message).toContain('"laya_status"')
+  })
+
+  test("a declared tool that fails is the backend's error, not a naming complaint", async () => {
+    // The declared list is consulted only after a failure, so a stale entry still
+    // reaches the backend and its own error is what the caller sees.
+    const fake = new FakeBackend({
+      name: "laya",
+      toolPrefix: "laya_",
+      tools: [{ name: "laya_predict" }],
+      fail: new Error("out of memory"),
+    })
+    const { url } = await listen(portOf({ laya: fake }))
+
+    const res = await post(`${url}/call`, { backend: "laya", tool: "predict", arguments: {} })
+    expect(res.status).toBe(500)
+    expect(((await res.json()) as { message: string }).message).toContain("out of memory")
+  })
+})
+
+describe("catalog schemas", () => {
+  const schemasOf = async (url: string, backend: string) => {
+    const catalog = (await (await fetch(`${url}/catalog`)).json()) as {
+      backends: { backend: string; tools: { tools: { name: string; inputSchema: unknown }[] } }[]
+    }
+    return Object.fromEntries(
+      catalog.backends.find((b) => b.backend === backend)!.tools.tools.map((t) => [t.name, t.inputSchema]),
+    )
+  }
+
+  test("laya and julia advertise different state, which is what they accept", async () => {
+    // The reported consequence of an untyped catalog: the same structured state works
+    // against laya and is rejected by julia, with nothing in the catalog saying so.
+    const { url } = await listen(
+      portOf({
+        laya: new FakeBackend({ name: "laya", tools: [{ name: "predict" }] }),
+        julia: new FakeBackend({ name: "julia", tools: [{ name: "predict" }] }),
+      }),
+    )
+
+    const laya = (await schemasOf(url, "laya")).predict as { properties: { state: { type: unknown } } }
+    const julia = (await schemasOf(url, "julia")).predict as { properties: { state: { type: unknown } } }
+    expect(laya.properties.state.type).toContain("object")
+    expect(julia.properties.state.type).toBe("string")
+  })
+
+  test("a tool the model does not describe stays an open object", async () => {
+    const { url } = await listen(portOf({ laya: new FakeBackend({ name: "laya", tools: [{ name: "preset" }] }) }))
+    expect((await schemasOf(url, "laya")).preset).toEqual({ type: "object", additionalProperties: true })
+  })
+
+  test("a backend with no matching ModelSpec is served, and calls nothing", async () => {
+    const fake = new FakeBackend({ name: "rev", tools: [{ name: "predict" }] })
+    const { url } = await listen(portOf({ rev: fake }))
+
+    expect((await schemasOf(url, "rev")).predict).toEqual({ type: "object", additionalProperties: true })
+    // /catalog stays local: a real tools/list here is the cold load the catalog exists to avoid.
+    expect(fake.calls).toEqual([])
+  })
 })
 
 describe("client disconnect", () => {
