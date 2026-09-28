@@ -71,7 +71,7 @@ per-session stdio entry:
 
 ```jsonc
 {
-  "plugins": [{ "package": "/home/micah/Projects/onesystem/src/plugin" }],
+  "plugins": [{ "package": "/path/to/onesystem/src/plugin" }],
   "mcp": { "servers": { /* delete the old "laya-mcp" local entry */ } }
 }
 ```
@@ -145,7 +145,7 @@ This is `laya`.
 ```jsonc
 "laya": {
   "transport": "stdio-mcp",
-  "command": ["/home/micah/.config/opencode/bin/laya-mcp-idle-server"],
+  "command": ["/path/to/bin/laya-mcp-idle-server"],
   "env": { "LAYA_DEVICE": "cuda", "LAYA_PYTHON": "/path/to/venv/bin/python" },
   "startupTimeoutSecs": 180
 }

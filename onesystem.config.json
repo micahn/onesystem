@@ -1,4 +1,15 @@
 {
+  // Paths below are written `/path/to/...` and you are expected to substitute them.
+  //
+  // They cannot be `~/...` or `$HOME/...`: nothing in the config reader expands either
+  // one, so a tilde would be a value that parses, loads, and then fails to exec with a
+  // message about the wrong file. A literal `/path/to/` fails at the same point but says
+  // plainly what is wrong, which is the difference between a fixture and a trap.
+  //
+  // `onesystem install <model>` prints the exact block for your machine, including the
+  // interpreter and the weights directory, which is the part that cannot be written down
+  // in a repository at all.
+
   "host": "127.0.0.1",
   "port": 7331,
 
@@ -43,13 +54,18 @@
       // Omit it and the shim falls back to the mise interpreter, cannot import laya,
       // and dies on startup -- a failure that is easy to miss because the daemon keeps
       // answering with error payloads.
-      "command": ["/home/micah/.config/opencode/bin/laya-mcp-idle-server"],
+      //
+      // It points into the runtime `onesystem install laya` created, not a pipx venv.
+      // The installer owns the environment on purpose: a pipx venv is a shared,
+      // mutable thing that anything on the machine can upgrade out from under the
+      // model, and the ROCm torch build inside it is the part that must not move.
+      "command": ["/path/to/bin/laya-mcp-idle-server"],
       "env": {
         "LAYA_DEVICE": "cuda",
         "LAYA_PRELOAD": "0",
         "LAYA_IDLE_UNLOAD_SECS": "300",
         "LAYA_TOOL_TIMEOUT_SECS": "120",
-        "LAYA_PYTHON": "/home/micah/.local/share/pipx/venvs/laya/bin/python"
+        "LAYA_PYTHON": "/path/to/onesystem/runtimes/laya/.venv/bin/python"
       },
       "startupTimeoutSecs": 180,
 
@@ -70,14 +86,14 @@
     "julia": {
       "transport": "stdio-mcp",
       "command": [
-        "/home/micah/.local/share/onesystem/runtimes/julia/.venv/bin/python",
-        "/home/micah/Projects/onesystem/src/shims/julia-mcp.py"
+        "/path/to/onesystem/runtimes/julia/.venv/bin/python",
+        "/path/to/onesystem/src/shims/julia-mcp.py"
       ],
       "env": {
         "JULIA_DEVICE": "cuda",
         // Weights, not code. Fetched once by the installer and kept outside the runtime,
         // because a reinstall replaces the runtime and would otherwise take them with it.
-        "JULIA_CHECKPOINT": "/home/micah/.local/share/onesystem/weights/julia",
+        "JULIA_CHECKPOINT": "/path/to/onesystem/weights/julia",
         "JULIA_IDLE_UNLOAD_SECS": "300",
         "JULIA_TOOL_TIMEOUT_SECS": "120"
       },
