@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { statusLine, statusReport } from "../src/plugin/tui.ts"
+import { formatUsage, statusLine, statusReport } from "../src/plugin/tui.ts"
 import { healthReport } from "../src/health.ts"
 import type { BackendStatus } from "../src/backend/types.ts"
 
@@ -35,10 +35,23 @@ function backend(over: Partial<BackendStatus> = {}): BackendStatus {
 const report = (...backends: BackendStatus[]) => healthReport({ idleShutdownSecs: 600, backends })
 
 describe("status line", () => {
-  test("a daemon that is not answering says so", () => {
-    // The distinction the user needs: "the daemon is gone" is not the same as "the daemon
-    // is up and idle", and opencode's own MCP indicator cannot tell them apart.
-    expect(statusLine(null)).toEqual({ text: "onesystem: down", tone: "error" })
+  test("a daemon that was never up is an error", () => {
+    expect(statusLine(null)).toEqual({ text: "onesystem: not running", tone: "error" })
+  })
+
+  test("a daemon that wound down on its idle window is not an error", () => {
+    // The bug this fixes: both of these rendered as "down" in the error colour, because
+    // nothing distinguished them. A daemon that stopped after its quiet window has done
+    // exactly what it was configured to do -- it released the GPU and went away, which is
+    // the entire point of the idle window. Showing that as breakage is a false alarm, and
+    // a card that cries wolf is a card nobody reads.
+    expect(statusLine(null, true)).toEqual({ text: "onesystem: idle (GPU released)", tone: "info" })
+  })
+
+  test("and the distinction is only made once a healthy daemon has actually been seen", () => {
+    // A TUI that has just started cannot know, so it says "not running" -- which is the
+    // truth from where it is standing.
+    expect(statusLine(null, false).tone).toBe("error")
   })
 
   test("a warm backend is the good state and is called out", () => {
@@ -137,5 +150,42 @@ describe("the detail view", () => {
 
   test("a daemon that is not running says so plainly", () => {
     expect(statusReport(null, "http://127.0.0.1:7331")).toContain("no daemon is answering")
+  })
+
+  test("a daemon that wound down is explained, not reported as a failure", () => {
+    const out = statusReport(null, "http://127.0.0.1:7331", true)
+    expect(out).toContain("wound itself down on the idle window")
+    expect(out).toContain("not a failure")
+    // And the thing that is actually actionable.
+    expect(out).toContain("next tool call restarts it")
+  })
+
+  test("no duration is invented, because the plugin only learns of it on the next poll", () => {
+    const out = statusReport(null, "http://127.0.0.1:7331", true)
+    expect(out).not.toMatch(/\d+s ago|for \d+s/)
+  })
+})
+
+
+describe("the usage line", () => {
+  test("shows calls, answered and volume on one line", () => {
+    // This is what the card renders, so it is the one that has to be short enough to fit a
+    // sidebar and still carry the three numbers.
+    expect(
+      formatUsage(backend({ calls: 3, answered: 5, inBytes: 2048, outBytes: 1024 })),
+    ).toBe("3 calls · 5 answered · 3.0KB moved")
+  })
+
+  test("a model that has never been called reads as zero, not as missing", () => {
+    expect(formatUsage(backend())).toBe("0 calls · 0 answered · 0B")
+  })
+
+  test("volume is in and out together, because the split is detail", () => {
+    // The dialog shows the split; the card does not have the width for it, and "moved" is
+    // the question the card is answering.
+    // 100_000 bytes is 97.7 KiB, not 100 KB -- the formatter divides by 1024 like the rest
+    // of the tool does, and the test should say so rather than round in its favour.
+    const out = formatUsage(backend({ inBytes: 10_000, outBytes: 90_000 }))
+    expect(out).toContain("97.7KB moved")
   })
 })

@@ -40,6 +40,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
 import { jsx } from "@opentui/solid/jsx-runtime"
 import { probeHealth, type HealthReport } from "../health.ts"
+import type { BackendStatus } from "../backend/types.ts"
 import { findModel, MODELS } from "../models.ts"
 import { defaultCli, pluginLog, resolveBase, run } from "./discover.ts"
 
@@ -48,6 +49,19 @@ const POLL_MS = 4_000
 
 type Tone = "info" | "success" | "warning" | "error"
 type Line = { text: string; tone: Tone }
+
+/**
+ * The per-model usage line, shared by the card and the dialog.
+ *
+ * One formatter rather than two, because the card and the dialog are the same facts at two
+ * widths, and a second copy is how they start disagreeing about what the numbers mean.
+ * Compact by default; the dialog adds the breakdown underneath.
+ */
+export function formatUsage(b: BackendStatus): string {
+  const answered = `${b.answered} answered`
+  const bytes = b.inBytes + b.outBytes === 0 ? "0B" : `${formatBytes(b.inBytes + b.outBytes)} moved`
+  return `${b.calls} calls · ${answered} · ${bytes}`
+}
 
 /** Bytes as something a person can read at a glance. */
 function formatBytes(n: number): string {
@@ -74,8 +88,19 @@ function describeTypes(byType: Record<string, number>): string {
  *
  * No tokens, deliberately. See BackendStatus.
  */
-export function statusReport(health: HealthReport | null, base: string | null): string {
-  if (!health) return `no daemon is answering${base ? ` at ${base}` : ""}`
+export function statusReport(health: HealthReport | null, base: string | null, woundDown = false): string {
+  if (!health) {
+    if (woundDown) {
+      return [
+        `daemon  ${base ?? ""}  not answering`.trim(),
+        "",
+        "It was up earlier in this session, so it wound itself down on the idle window",
+        "and released the GPU. That is the intended behaviour, not a failure.",
+        "The next tool call restarts it; so does `onesystem start`.",
+      ].join("\n")
+    }
+    return `no daemon is answering${base ? ` at ${base}` : ""} — run \`onesystem start\``
+  }
 
   const lines = [`daemon  ${base}   up ${Math.round(health.uptimeMs / 1000)}s`]
   for (const b of health.backends) {
@@ -102,8 +127,16 @@ export function statusReport(health: HealthReport | null, base: string | null): 
  * formatting is the part that rots, because a state is added to the backend and nobody
  * remembers there is a switch here.
  */
-export function statusLine(health: HealthReport | null): Line {
-  if (!health) return { text: "onesystem: down", tone: "error" }
+export function statusLine(health: HealthReport | null, woundDown = false): Line {
+  if (!health) {
+    // Two different states that both render as "nothing is there", and only one of them
+    // is a problem. A daemon that stopped after its quiet window has done exactly what it
+    // was configured to do -- it released the GPU and went away, which is the point of the
+    // idle window. Showing that in the error colour, next to a port that is not answering,
+    // reads as breakage and is not.
+    if (woundDown) return { text: "onesystem: idle (GPU released)", tone: "info" }
+    return { text: "onesystem: not running", tone: "error" }
+  }
 
   const backends = health.backends
   if (backends.length === 0) return { text: "onesystem: up, no backends", tone: "warning" }
@@ -137,6 +170,15 @@ export default Plugin.define({
     // disagree about what the daemon is doing.
     const [line, setLine] = createSignal<Line>({ text: "onesystem: …", tone: "info" })
     const [report, setReport] = createSignal<HealthReport | null>(null)
+    /**
+     * Whether a healthy daemon has been seen in this session.
+     *
+     * This is the only thing that distinguishes "never started" from "wound itself down",
+     * and it is exactly the distinction the user needs: the second is the idle window
+     * working. A TUI that has just started cannot know, so it says "not running", which is
+     * the truth from where it is standing.
+     */
+    const [sawHealthy, setSawHealthy] = createSignal(false)
 
     const cli = defaultCli()
     let base: string | null = null
@@ -153,8 +195,9 @@ export default Plugin.define({
         }
       }
       const health = await probeHealth(base)
+      if (health) setSawHealthy(true)
       setReport(health)
-      setLine(statusLine(health))
+      setLine(statusLine(health, sawHealthy()))
     }
 
     // The re-entrancy guard lives here and only here. It also lived at the top of
@@ -194,7 +237,10 @@ export default Plugin.define({
         ],
       })
       if (choice === "status") {
-        await ctx.ui.dialog.alert({ title: "onesystem", message: statusReport(base ? await probeHealth(base) : null, base) })
+        await ctx.ui.dialog.alert({
+          title: "onesystem",
+          message: statusReport(base ? await probeHealth(base) : null, base, sawHealthy()),
+        })
         return
       }
       if (!choice?.startsWith("install:")) return
@@ -246,7 +292,19 @@ export default Plugin.define({
       render: () => {
         const h = report()
         if (!h) {
-          return jsx("text", { fg: ctx.theme.text.feedback.error.base, children: "onesystem: not running" })
+          // Same distinction as the footer. A daemon that released the GPU on its idle
+          // timer is not an error, and colouring it like one trains the reader to ignore
+          // this card exactly when it matters.
+          if (sawHealthy()) {
+            // No duration claimed: this plugin only learns the daemon is gone on its next
+            // poll, so anything it printed would be a guess. What it does know is that the
+            // next tool call brings it back, which is the part that is actionable.
+            return jsx("text", {
+              fg: ctx.theme.text.muted,
+              children: "onesystem  idle, GPU released  ·  next tool call restarts it",
+            })
+          }
+          return jsx("text", { fg: ctx.theme.text.feedback.error.base, children: "onesystem  not running" })
         }
         const n = h.backends.length
         const warm = h.backends.filter((b) => b.state === "warm").length
@@ -270,7 +328,9 @@ export default Plugin.define({
                   : b.state === "warm"
                     ? ctx.theme.text.feedback.success.base
                     : ctx.theme.text.muted,
-              children: `  ${b.name} ${b.state}${b.inflight > 0 ? ` (${b.inflight})` : ""}`,
+              // The usage is on the same line as the state, because the question this
+              // card answers is "is it being used", and that needs both at once.
+              children: `  ${b.name} ${b.state}  ${formatUsage(b)}`,
             }),
           )
         }
