@@ -3,7 +3,10 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 import { cardRows, daemonView, formatUsage, statusLine, statusReport } from "../src/plugin/tui.ts"
+import { pluginLog } from "../src/plugin/discover.ts"
 import { healthReport } from "../src/health.ts"
 import type { BackendStatus } from "../src/backend/types.ts"
 
@@ -306,5 +309,47 @@ describe("the sidebar card", () => {
     expect(dialog).toContain("7 calls")
     expect(dialog).toContain("7 answered")
     expect(dialog).toContain("2.0K in / 1.0K out")
+  })
+})
+
+describe("plugin logging", () => {
+  const capture = (env: string | undefined) => {
+    const lines: string[] = []
+    const sink = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((s: any) => (lines.push(String(s)), true)) as typeof process.stderr.write
+    const previous = process.env.ONESYSTEM_PLUGIN_LOG
+    if (env === undefined) delete process.env.ONESYSTEM_PLUGIN_LOG
+    else process.env.ONESYSTEM_PLUGIN_LOG = env
+    try {
+      pluginLog("hello")
+    } finally {
+      process.stderr.write = sink
+      if (previous === undefined) delete process.env.ONESYSTEM_PLUGIN_LOG
+      else process.env.ONESYSTEM_PLUGIN_LOG = previous
+    }
+    return lines.join("")
+  }
+
+  test("silent by default, because the TUI renders whatever a plugin writes", () => {
+    // This is the bug: the status line's own teardown logged unconditionally, and the line
+    // appeared over the interface. Nothing here should print without being asked to.
+    expect(capture(undefined)).toBe("")
+    expect(capture("")).toBe("")
+    expect(capture("0")).toBe("")
+    expect(capture("false")).toBe("")
+  })
+
+  test("on when ONESYSTEM_PLUGIN_LOG asks for it", () => {
+    for (const env of ["1", "true", "yes", "on", "ON"]) {
+      expect(`${env}: ${capture(env)}`).toBe(`${env}: [onesystem:plugin] info hello\n`)
+    }
+  })
+
+  test("the TUI plugin logs nothing of its own", async () => {
+    // The server plugin may log to OpenCode's log file, where stderr is captured. The TUI
+    // plugin has no such place to put a line.
+    const tui = await readFile(join(import.meta.dir, "..", "src", "plugin", "tui.ts"), "utf8")
+    expect(tui).not.toContain("pluginLog")
+    expect(tui).not.toContain("process.stdout.write")
   })
 })

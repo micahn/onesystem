@@ -224,6 +224,10 @@ Tests use fake backends and need no GPU. For an AMD/ROCm check, install the laya
 runtime and run `./test/e2e-laya.sh`. It stops and starts the daemon on port 7331,
 so run it when no active session needs the service.
 
+The plugin logs nothing by default, because the TUI shares the terminal with OpenCode's
+interface and renders whatever a plugin writes. Set `ONESYSTEM_PLUGIN_LOG=1` to see its
+diagnostics.
+
 ### Measured performance
 
 AMD RX 9070 XT (gfx1201), ROCm 6.4 driver, ROCm 7.2 PyTorch wheel, laya 0.3.21:

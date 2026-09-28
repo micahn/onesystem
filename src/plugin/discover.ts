@@ -16,8 +16,18 @@ export type DaemonAnswer = Pick<DaemonStatus, "url" | "registrations"> & {
   routing?: DaemonStatus["routing"]
 }
 
+/**
+ * Diagnostics for the plugin, silent unless ONESYSTEM_PLUGIN_LOG is set. The TUI plugin
+ * shares the terminal with OpenCode's interface and OpenCode renders whatever a plugin
+ * writes, so an unconditional line lands on top of the status line.
+ */
 export function pluginLog(msg: string, extra?: Record<string, unknown>): void {
+  if (!pluginLogEnabled()) return
   process.stderr.write(formatLine("plugin", "info", msg, extra))
+}
+
+function pluginLogEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.ONESYSTEM_PLUGIN_LOG ?? "")
 }
 
 /**

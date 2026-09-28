@@ -14,7 +14,7 @@ import { MODELS } from "../models.ts"
 import { loadConfig } from "../config.ts"
 import { switchToBackend } from "../config-edit.ts"
 import { describeError } from "../async.ts"
-import { defaultCli, pluginLog, resolveBase, run } from "./discover.ts"
+import { defaultCli, resolveBase, run } from "./discover.ts"
 
 /** How often to re-read /health. */
 const POLL_MS = 4_000
@@ -401,7 +401,6 @@ export default Plugin.define({
       clearInterval(timer)
       card()
       dispose()
-      pluginLog("status line disposed")
     }
   },
 })
