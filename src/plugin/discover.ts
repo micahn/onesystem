@@ -19,16 +19,26 @@
 
 import { spawn } from "node:child_process"
 import { basename } from "node:path"
-import type { DaemonStatus } from "../config.ts"
+import type { DaemonStatus } from "../health.ts"
 import { formatLine } from "../log.ts"
-import type { RoutingConfig } from "../routing.ts"
 
-export interface DaemonAnswer {
-  /** Base URL the daemon answers on. */
-  url: string
-  registrations: { backend: string; serverName: string; toolPrefix?: string }[]
+/**
+ * The part of the status payload this module reads.
+ *
+ * Derived from `DaemonStatus` with `Pick` rather than re-spelled, which is the point of the
+ * whole arrangement and was previously only aspirational. The old comment on `DaemonStatus`
+ * said it existed "rather than being re-spelled as an anonymous object in the CLI and parsed
+ * as a second anonymous object in the plugin", and then went on to note that `toolPrefix` was
+ * "produced here and discarded there" -- which is exactly the drift it was claiming to
+ * prevent, and which nothing would have caught.
+ *
+ * With a `Pick`, dropping or renaming a field on `DaemonStatus` is a compile error here
+ * rather than a plugin that quietly reads `undefined` at session start. Adding one is not an
+ * error, and that is correct: a field nobody reads yet is not a problem.
+ */
+export type DaemonAnswer = Pick<DaemonStatus, "url" | "registrations"> & {
   /** Present only when the config declares one. */
-  routing?: RoutingConfig
+  routing?: DaemonStatus["routing"]
 }
 
 export function pluginLog(msg: string, extra?: Record<string, unknown>): void {

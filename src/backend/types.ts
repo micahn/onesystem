@@ -25,7 +25,7 @@
  * that is optional in the interface is a cancellation path that does not happen.
  */
 
-import type { Transport } from "../config.ts"
+import type { Transport } from "./spec.ts"
 
 export type BackendState = "cold" | "starting" | "warm" | "stopping" | "failed"
 

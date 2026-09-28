@@ -28,17 +28,10 @@ import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import {
-  configCandidates,
-  configDir,
-  daemonUrl,
-  loadConfig,
-  lockPath,
-  registrations,
-  stateDir,
-  type Config,
-  type DaemonStatus,
-} from "./config.ts"
+import { loadConfig, type Config } from "./config.ts"
+import { configCandidates, configDir, daemonUrl, lockPath, stateDir } from "./paths.ts"
+import { registrations } from "./naming.ts"
+import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
@@ -65,7 +58,7 @@ async function cmdServe(config: Config): Promise<void> {
 }
 
 async function cmdStart(config: Config): Promise<number> {
-  const url = daemonUrl(config)
+  const url = daemonUrl(config.host, config.port)
 
   const existing = await probe(url)
   if (existing) {
@@ -116,7 +109,7 @@ async function cmdStart(config: Config): Promise<number> {
 }
 
 async function cmdStop(config: Config): Promise<number> {
-  const url = daemonUrl(config)
+  const url = daemonUrl(config.host, config.port)
   const health = await probe(url)
   if (!health) {
     log.info("no daemon reachable", { url })
@@ -147,7 +140,7 @@ async function cmdStop(config: Config): Promise<number> {
 }
 
 async function cmdStatus(config: Config, configPath: string): Promise<number> {
-  const url = daemonUrl(config)
+  const url = daemonUrl(config.host, config.port)
   const health = await probe(url)
   const holder = await inspect(lockPath()).catch(() => null)
 
@@ -164,7 +157,7 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
     lock: holder,
     // The names the plugin will actually register, not a restatement of the config, so
     // `status` and the live tool surface cannot drift apart.
-    registrations: registrations(config),
+    registrations: registrations(config.backends),
     idleShutdownSecs: config.idleShutdownSecs,
     ...(config.routing ? { routing: config.routing } : {}),
   }

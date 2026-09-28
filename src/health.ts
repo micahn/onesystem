@@ -18,6 +18,58 @@
  */
 
 import type { BackendStatus } from "./backend/types.ts"
+import type { Holder as LockHolder } from "./lock.ts"
+import type { BackendRegistration } from "./naming.ts"
+import type { RoutingConfig } from "./routing.ts"
+
+/**
+ * Everything `onesystem status` reports, which is the whole of what the opencode plugin
+ * knows about the daemon.
+ *
+ * This type used to live in `config.ts`, with a comment arguing that it belonged "next to
+ * the rules that produce it". The rules that produce it are in `cli.ts`, and the comment's
+ * own reasoning pointed the other way: what forced it into `config.ts` was that
+ * `config.ts` was the one module already importing the types of the other three, so this
+ * is the type that closed a three-module cycle:
+ *
+ *     config.ts -> health.ts -> backend/types.ts -> config.ts
+ *
+ * It is a *report* type — a machine interface, consumed by a plugin and printed by a CLI —
+ * so it belongs beside the other report, which is this file. Its inputs are `HealthReport`
+ * (here), `LockHolder` (`lock.ts`), `BackendRegistration` (`naming.ts`) and `RoutingConfig`
+ * (`routing.ts`), and none of those imports this file, so nothing closes.
+ *
+ * It is also how the plugin stops guessing the address. `url` is the one true answer,
+ * computed from the config the daemon actually loaded, and it is the answer the plugin uses.
+ *
+ * ## The payload is a contract
+ *
+ * `onesystem status --json` is read by `plugin/discover.ts`, which is a different program
+ * from the one writing it. So the shape below is a wire format: adding a field is safe,
+ * renaming or dropping one is a breaking change, and a field that stops being emitted is a
+ * plugin that has quietly lost information. `test/status-payload.test.ts` pins the key set,
+ * which is the only thing standing between a refactor of this file and a live session whose
+ * tools are registered against a port nothing is listening on.
+ */
+export interface DaemonStatus {
+  /** The config file in use. */
+  config: string
+  /** Every path that would be tried, in order. */
+  configCandidates: string[]
+  configDir: string
+  /** Base URL the daemon answers on. */
+  url: string
+  running: boolean
+  /** The health report, or null when nothing is listening. */
+  daemon: HealthReport | null
+  /** Who holds the lock, if anyone. */
+  lock: LockHolder | null
+  /** What opencode should register, and under which names. */
+  registrations: BackendRegistration[]
+  idleShutdownSecs: number
+  /** Present only when the config declares one; omitted otherwise. */
+  routing?: RoutingConfig
+}
 
 export interface HealthReport {
   status: "ok"

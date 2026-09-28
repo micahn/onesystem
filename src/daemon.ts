@@ -21,7 +21,7 @@
  */
 
 import type { Config } from "./config.ts"
-import { lockPath } from "./config.ts"
+import { lockPath } from "./paths.ts"
 import { logger } from "./log.ts"
 import { describeError } from "./async.ts"
 import { acquire, LockBusy, type Lease } from "./lock.ts"

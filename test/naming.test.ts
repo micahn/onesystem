@@ -15,7 +15,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { validate, registrations, type Config } from "../src/config.ts"
+import { validate, type Config, type ConfiguredBackend } from "../src/config.ts"
+import { registrations } from "../src/naming.ts"
 import { runDaemon, probe } from "../src/daemon.ts"
 
 const cleanups: (() => Promise<void>)[] = []
@@ -118,38 +119,68 @@ describe("tool naming", () => {
 })
 
 describe("server naming", () => {
-  const base = {
-    a: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
-    b: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
-  }
+  // Literals, not `validate` output.
+  //
+  // These four tests used to call `validate({ backends: ... })` three times over, purely to
+  // obtain a `Config` literal to hand to `registrations()`. Which means the naming rules
+  // were never being tested -- the validator was, incidentally, on the way to them, and a
+  // naming bug and a validation bug looked identical from here. `registrations` takes the
+  // `backends` map now, so a rule is a rule and a literal is enough.
+  const a: ConfiguredBackend = { transport: "stdio-mcp", command: ["x"], tools: ["predict"] }
+  const b: ConfiguredBackend = { transport: "stdio-mcp", command: ["x"], tools: ["predict"] }
 
   test("a single enabled backend gets the clean name", () => {
-    const config = validate({ backends: { a: base.a, b: { ...base.b, enabled: false } } }, "test")
-    expect(registrations(config)).toEqual([
+    expect(registrations({ a, b: { ...b, enabled: false } })).toEqual([
       { backend: "a", serverName: "onesystem", toolPrefix: undefined, transport: "stdio-mcp" },
     ])
   })
 
   test("several backends cannot both claim `onesystem`", () => {
-    const config = validate({ backends: base }, "test")
-    const names = registrations(config).map((r) => r.serverName)
+    const names = registrations({ a, b }).map((r) => r.serverName)
     expect(names).toEqual(["onesystem-a", "onesystem-b"])
     expect(new Set(names).size).toBe(2)
   })
 
   test("an explicit serverName wins", () => {
-    const config = validate(
-      { backends: { a: { ...base.a, serverName: "decisions" }, b: { ...base.b, enabled: false } } },
-      "test",
+    expect(registrations({ a: { ...a, serverName: "decisions" }, b: { ...b, enabled: false } })[0]!.serverName).toBe(
+      "decisions",
     )
-    expect(registrations(config)[0]!.serverName).toBe("decisions")
   })
 
   test("toolPrefix is carried through", () => {
-    const config = validate(
-      { backends: { a: { ...base.a, toolPrefix: "laya_" }, b: { ...base.b, enabled: false } } },
-      "test",
+    expect(registrations({ a: { ...a, toolPrefix: "laya_" }, b: { ...b, enabled: false } })[0]!.toolPrefix).toBe(
+      "laya_",
     )
-    expect(registrations(config)[0]!.toolPrefix).toBe("laya_")
+  })
+
+  test("a disabled backend is not registered at all", () => {
+    // `enabled: false` rather than absent, since absent means on.
+    expect(registrations({ a, b: { ...b, enabled: false } }).map((r) => r.backend)).toEqual(["a"])
+  })
+
+  test("no backends is an empty list, not a crash", () => {
+    expect(registrations({})).toEqual([])
+  })
+
+  test("validate produces what registrations will read", () => {
+    // The drift guard, and the reason the two are tested separately rather than one
+    // through the other. `registrations` reads the declared `backends` map; `validate` is
+    // what fills that map in. If the validator ever stopped carrying a field through —
+    // `serverName`, `toolPrefix`, `enabled` — the naming rules would keep passing on
+    // literals while production quietly got a different answer. This is the assertion that
+    // notices, and it is the one the old test was accidentally close to without being.
+    const raw: { backends: Record<string, ConfiguredBackend> } = {
+      backends: {
+        a: { transport: "stdio-mcp", command: ["x"], tools: ["predict"], serverName: "decisions", toolPrefix: "laya_" },
+        b: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
+        c: { transport: "stdio-mcp", command: ["x"], tools: ["predict"], enabled: false },
+      },
+    }
+    const config = validate(raw, "test")
+    expect(registrations(config.backends)).toEqual(registrations(raw.backends))
+    // And specifically the three fields, so a failure says which one drifted.
+    expect(config.backends.a!.serverName).toBe("decisions")
+    expect(config.backends.a!.toolPrefix).toBe("laya_")
+    expect(config.backends.c!.enabled).toBe(false)
   })
 })

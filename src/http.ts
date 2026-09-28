@@ -69,6 +69,7 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import type { Config } from "./config.ts"
+import { daemonUrl } from "./paths.ts"
 import { healthReport } from "./health.ts"
 import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
@@ -350,11 +351,6 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
       await new Promise<void>((resolve) => server.close(() => resolve()))
     },
   }
-}
-
-/** The one place a daemon's address is assembled. See `daemonUrl` in config.ts. */
-function daemonUrl(host: string, port: number): string {
-  return `http://${host}:${port}`
 }
 
 /**

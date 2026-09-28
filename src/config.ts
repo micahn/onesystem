@@ -1,12 +1,33 @@
 /**
- * Configuration: what backends exist, where they listen, and when they shut down.
+ * The config file: what a person wrote, and whether it is allowed.
  *
- * Two backend transports, because the System 1 landscape of Sept 2026 does not agree
- * on one:
+ * This module used to be four subjects in one namespace -- path layout, naming policy,
+ * validation, and the daemon's report schema -- which is 20 exports across 438 lines and
+ * the widest interface in the codebase. The friction was never the module: `validate` is
+ * genuinely deep, putting ~130 lines of refusal behaviour behind one small entry point, and
+ * it is the best-tested thing here. The friction was the other three subjects sharing its
+ * namespace, and one of them forcing a type cycle:
  *
- *   - `stdio-mcp` — a local process speaking MCP over stdin/stdout. This is what
+ *     config.ts -> health.ts -> backend/types.ts -> config.ts
+ *
+ * Which is a strange thing for a config file to be doing. `DaemonStatus` is a *report* type
+ * and it could only live here because this was the one module already importing the other
+ * three. So it moved to `health.ts`, beside the report it embeds.
+ *
+ * What is left is one subject, and a coherent one: the declared shape (`Config`, `DEFAULTS`),
+ * `validate`, which decides what may be said, and `loadConfig`, which finds and parses a
+ * file. The rest went where it belonged -- `paths.ts` for where things live on disk,
+ * `naming.ts` for what a backend is called, `backend/spec.ts` for what a backend *is*
+ * (importing nothing, which is what closes the cycle), and `health.ts` for what the daemon
+ * reports.
+ *
+ * ## Two backend transports
+ *
+ * Because the System 1 landscape of Sept 2026 does not agree on one:
+ *
+ *   - `stdio-mcp` -- a local process speaking MCP over stdin/stdout. This is what
  *     `laya` is, and it is the transport that needs a real local process.
- *   - `systemone-http` — an already-running service speaking `POST /v1/systemone`,
+ *   - `systemone-http` -- an already-running service speaking `POST /v1/systemone`,
  *     the spec published by TypeSafe's typesafe-sdk and implemented by `rev`.
  *     onesystem does not start these; it only calls them.
  *
@@ -16,75 +37,22 @@
  */
 
 import { readFile } from "node:fs/promises"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
-import type { HealthReport } from "./health.ts"
-import { planNames } from "./naming.ts"
-import type { Holder as LockHolder } from "./lock.ts"
+import type { ConfiguredBackend, Transport } from "./backend/spec.ts"
+import { configCandidates } from "./paths.ts"
 import type { RoutingConfig } from "./routing.ts"
 
-export type Transport = "stdio-mcp" | "systemone-http"
-
-/**
- * How a backend presents itself to opencode.
- *
- * Tool names are rewritten on the way through so the surface reads
- * `onesystem.predict` rather than `onesystem.laya_predict`. The prefix is stripped
- * explicitly rather than guessed: the daemon cannot know that a backend's tools happen
- * to be prefixed with its own product name, and a wrong guess would silently rename
- * every tool. An unset prefix means names pass through untouched.
- */
-export interface BackendNaming {
-  /**
-   * Stripped from tool names as they cross the bridge, and added back on the way in.
-   * `"laya_"` turns `laya_predict` into `predict`.
-   */
-  toolPrefix?: string
-  /**
-   * Name opencode registers this backend's MCP server under. Defaults to `onesystem`
-   * when exactly one backend is enabled, and `onesystem-<backend>` otherwise, so two
-   * backends cannot claim the same server name.
-   */
-  serverName?: string
-}
-
-export interface StdioBackend extends BackendNaming {
-  transport: "stdio-mcp"
-  /** Executable plus args. First element is the program. */
-  command: string[]
-  env?: Record<string, string>
-  cwd?: string
-  /** Handshake budget for spawning this process and completing `initialize`. */
-  startupTimeoutSecs?: number
-  /**
-   * The tool names this backend exposes, without the product prefix.
-   *
-   * Required, and this is the one place a model surface is written down by hand. It used
-   * to be read from the model's own `tools/list` at session start, which is a
-   * contradiction this project's central property cannot survive: asking the model *is*
-   * the 20-54s load and 3 GB of VRAM that the lazy-start contract exists to keep off a
-   * path the agent did not ask for. So the surface is declared here, and the daemon hands
-   * it out without loading anything.
-   *
-   * The trade is real and worth stating plainly. laya went from 0.3.10 to 0.3.21 during
-   * development and added a tool, so this list can go stale against a release. When it
-   * does, a name here that the process does not answer fails the call with the backend's
-   * own "unknown tool" rather than silently doing nothing — which is the failure mode this
-   * list exists to prefer over a session that loads three gigabytes of torch before the
-   * agent has typed anything.
-   */
-  tools: string[]
-}
-
-export interface SystemOneBackend extends BackendNaming {
-  transport: "systemone-http"
-  /** Base URL of a running service, without the /v1/systemone path. */
-  baseUrl: string
-  startupTimeoutSecs?: number
-}
-
-export type Backend = StdioBackend | SystemOneBackend
+// Re-exported so a caller that wants a backend's declared shape does not have to know
+// which of the four modules it ended up in. The *values* moved; these names are still the
+// obvious way to ask for the types, and keeping them here costs one line and saves a
+// rename across five adapters and a dozen tests.
+export type {
+  BackendSpec,
+  ConfiguredBackend,
+  StdioBackend,
+  SystemOneBackend,
+  Transport,
+} from "./backend/spec.ts"
 
 export interface Config {
   /**
@@ -115,7 +83,7 @@ export interface Config {
   idleSweepSecs: number
   /** Ceiling on one forwarded MCP call. Mirrors LAYA_TOOL_TIMEOUT_SECS. */
   requestTimeoutSecs: number
-  backends: Record<string, Backend & { enabled?: boolean }>
+  backends: Record<string, ConfiguredBackend>
   /**
    * Which model answers when the agent has not said. See src/routing.ts.
    *
@@ -144,103 +112,22 @@ export const DEFAULTS: Config = {
  */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"])
 
-export function isLoopbackHost(host: string): boolean {
+/**
+ * Is this a loopback address?
+ *
+ * `localhost` is allowed because it is what a person would type, but it is only equivalent
+ * to `127.0.0.1` if it resolves there — so it is resolved rather than trusted.
+ *
+ * Not exported: `validate` is the only caller, and it is a refusal rule rather than a
+ * vocabulary anyone else needs. It used to be exported from a module that also owned path
+ * layout and the status schema, which is how a helper nobody outside the file uses ends up
+ * looking like part of the interface.
+ */
+function isLoopbackHost(host: string): boolean {
   const bare = host.replace(/^\[|\]$/g, "").toLowerCase()
   if (LOOPBACK_HOSTS.has(bare)) return true
   // 127.0.0.0/8 is all loopback, not just 127.0.0.1.
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)
-}
-
-/**
- * The daemon's base URL. Assembled once.
- *
- * This was built in three places from a `Config` — here, in the CLI, and in the plugin
- * from environment variables no daemon code reads — so a user who set `port` in the config
- * and a user who set `ONESYSTEM_PORT` got two daemons' worth of disagreement, and the
- * symptom was an MCP server registered against a port nothing was listening on. The
- * plugin now reads the URL out of `onesystem status` instead of deriving one.
- */
-export function daemonUrl(config: Config, port: number = config.port): string {
-  const host = config.host.includes(":") && !config.host.startsWith("[") ? `[${config.host}]` : config.host
-  return `http://${host}:${port}`
-}
-
-
-export function configDir(): string {
-  return process.env.ONESYSTEM_CONFIG_DIR ?? join(homedir(), ".config", "onesystem")
-}
-
-export function stateDir(): string {
-  return process.env.ONESYSTEM_STATE_DIR ?? join(homedir(), ".local", "state", "onesystem")
-}
-
-export function lockPath(): string {
-  return join(stateDir(), "daemon.lock")
-}
-
-export function defaultConfigPath(): string {
-  return join(configDir(), "onesystem.json")
-}
-
-export interface BackendRegistration {
-  /** Backend name, as used in the URL path `/mcp/<backend>`. */
-  backend: string
-  /** Name opencode should register the MCP server under. */
-  serverName: string
-  /** Prefix stripped from this backend's tool names, if any. */
-  toolPrefix?: string
-  transport: Transport
-}
-
-/**
- * Work out what opencode should register, and how tools should be named.
- *
- * Lives here rather than in the plugin so the plugin does not have to re-derive it,
- * and so `onesystem status` can report the same names the plugin will actually use.
- * A mismatch there is the kind of thing that is only noticed when a tool is missing.
- *
- * The rule itself is in `naming.ts`, because this is no longer the only place that needs
- * it: the routing decision and the tool-name plan were each deriving a name independently,
- * and `routing.resolve` was inventing `onesystem` for a backend this function had already
- * named `onesystem-laya`. One rule, three readers.
- *
- * No `preferred` is passed, deliberately. A server name does not depend on which backend
- * is the routing default — that affects which *tools* are bare, not what the server is
- * called — so `onesystem status` reports the same names whether routing is on or off, and
- * cannot drift because of it.
- */
-export function registrations(config: Config): BackendRegistration[] {
-  const enabled = Object.entries(config.backends).filter(([, spec]) => spec.enabled !== false)
-  const planned = planNames(enabled.map(([backend, spec]) => ({ backend, serverName: spec.serverName })))
-  return planned.map((name) => {
-    const spec = config.backends[name.backend]!
-    return {
-      backend: name.backend,
-      // One backend gets the clean name. Several cannot all be `onesystem`, so the rest
-      // are qualified rather than silently overwriting each other in opencode's registry.
-      serverName: name.serverName,
-      toolPrefix: spec.toolPrefix,
-      transport: spec.transport,
-    }
-  })
-}
-
-/** Where a bundled example lives, used when the user has no config yet. */
-export function shippedConfigPath(): string {
-  return new URL("../onesystem.config.json", import.meta.url).pathname
-}
-
-/**
- * Every path `loadConfig` would try, in order.
- *
- * The first is what a person means by "my onesystem config"; the second is the bundled
- * example, so a fresh checkout runs without being told where anything is. `config-path`
- * prints all of them with which one is in use, because the old helper returned only the
- * first and claimed to be "the config file that would be used" — which is false for
- * exactly the users most likely to run it, those with no config file yet.
- */
-export function configCandidates(path?: string): string[] {
-  return path ? [path] : [defaultConfigPath(), shippedConfigPath()]
 }
 
 function requireNumber(value: unknown, field: string, fallback: number): number {
@@ -418,39 +305,6 @@ function readRouting(raw: unknown): RoutingConfig | undefined {
     tasks: Object.keys(tasks).length > 0 ? tasks : undefined,
   }
   return out.enabled || out.default || out.tasks ? out : undefined
-}
-
-/**
- * Everything `onesystem status` reports, which is the whole of what the opencode plugin
- * knows about the daemon.
- *
- * This type lives here, next to the rules that produce it, rather than being re-spelled
- * as an anonymous object in the CLI and parsed as a second anonymous object in the
- * plugin. Nothing checked that the two agreed, so `registrations` could gain a field the
- * plugin ignored — and did: `toolPrefix` is produced here and discarded there, which is
- * the sort of drift this whole arrangement exists to prevent.
- *
- * It is also how the plugin stops guessing the address. `url` is the one true answer,
- * computed from the config the daemon actually loaded.
- */
-export interface DaemonStatus {
-  /** The config file in use. */
-  config: string
-  /** Every path that would be tried, in order. */
-  configCandidates: string[]
-  configDir: string
-  /** Base URL the daemon answers on. */
-  url: string
-  running: boolean
-  /** The health report, or null when nothing is listening. */
-  daemon: HealthReport | null
-  /** Who holds the lock, if anyone. */
-  lock: LockHolder | null
-  /** What opencode should register, and under which names. */
-  registrations: BackendRegistration[]
-  idleShutdownSecs: number
-  /** Present only when the config declares one; omitted otherwise. */
-  routing?: RoutingConfig
 }
 
 export async function loadConfig(path?: string): Promise<{ config: Config; path: string }> {

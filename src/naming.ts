@@ -31,7 +31,14 @@
  * question about config rather than about names. It takes the preferred backend as a plain
  * string so that this module has no opinion about routing, and no import of it, and
  * therefore no cycle with the module that calls it.
+ *
+ * `registrations` and `BackendRegistration` arrived here from `config.ts`, which is where
+ * they used to live for the same reason the three rules drifted apart: one namespace, four
+ * subjects, and the one holding the rule had no reason to hold the policy. What is left in
+ * `config.ts` is the config *file* — the declared shape, `validate`, and `loadConfig`.
  */
+
+import type { ConfiguredBackend, Transport } from "./backend/spec.ts"
 
 export interface NameCandidate {
   backend: string
@@ -76,4 +83,50 @@ export function planNames(candidates: readonly NameCandidate[], preferred?: stri
     serverName: c.serverName ?? (single ? BARE_SERVER : `${BARE_SERVER}-${c.backend}`),
     bare: single || (preferred !== undefined && c.backend === preferred),
   }))
+}
+
+/**
+ * What opencode should register, and how.
+ *
+ * The other half of this module's answer, for the machine rather than the agent: a *server*
+ * name, the prefix stripped from tool names, and the transport.
+ */
+export interface BackendRegistration {
+  /** Backend name, as used in the URL path `/mcp/<backend>`. */
+  backend: string
+  /** Name opencode should register the MCP server under. */
+  serverName: string
+  /** Prefix stripped from this backend's tool names, if any. */
+  toolPrefix?: string
+  transport: Transport
+}
+
+/**
+ * Work out what opencode should register, from the backends the config declares.
+ *
+ * Takes the `backends` map rather than a `Config`, which is the smaller interface and the
+ * one that makes this testable: a test can pass a literal and get names out, with no
+ * validator in between. It used to take a `Config`, which meant `naming.ts` had to import
+ * `config.ts` while `config.ts` imported `naming.ts` for the naming rule — a type cycle
+ * created by two modules each wanting the other's subject.
+ *
+ * That it takes the declared backends and not the *enabled* ones is deliberate, and is why
+ * the argument is a map: which of them are enabled is a question about the config, answered
+ * here from `enabled !== false`, so a caller cannot pass a list that has quietly been
+ * filtered wrong.
+ */
+export function registrations(backends: Record<string, ConfiguredBackend>): BackendRegistration[] {
+  const enabled = Object.entries(backends).filter(([, spec]) => spec.enabled !== false)
+  const planned = planNames(enabled.map(([backend, spec]) => ({ backend, serverName: spec.serverName })))
+  return planned.map((name) => {
+    const spec = backends[name.backend]!
+    return {
+      backend: name.backend,
+      // One backend gets the clean name. Several cannot all be `onesystem`, so the rest are
+      // qualified rather than silently overwriting each other in opencode's registry.
+      serverName: name.serverName,
+      toolPrefix: spec.toolPrefix,
+      transport: spec.transport,
+    }
+  })
 }

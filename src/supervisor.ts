@@ -32,7 +32,8 @@
  * window has passed — and delegates every mechanism to the adapter.
  */
 
-import type { Backend as BackendSpec, Config } from "./config.ts"
+import type { Config } from "./config.ts"
+import type { BackendSpec } from "./backend/spec.ts"
 import { describeError, startDeadline, withTimeout } from "./async.ts"
 import { logger } from "./log.ts"
 import { StdioMcpBackend } from "./backend/stdio-mcp.ts"

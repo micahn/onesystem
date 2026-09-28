@@ -20,7 +20,8 @@
 
 import { describe, expect, test } from "bun:test"
 import { planTools, type Catalog } from "../src/plugin/tools.ts"
-import { registrations, validate, type Config } from "../src/config.ts"
+import { validate, type Config } from "../src/config.ts"
+import { registrations } from "../src/naming.ts"
 import { resolve } from "../src/routing.ts"
 import { planNames } from "../src/naming.ts"
 import { STUB_TOOLS } from "./fixtures/stub-daemon.ts"
@@ -70,7 +71,7 @@ for (const { what, config: cfg } of scenarios) {
       // `registrations` is what `onesystem status` prints, and the naming plan is what the
       // plugin hands the tool planner. They are computed from the same config by different
       // routes, so this is where a change to one that is not made to the other shows up.
-      const registered = registrations(cfg)
+      const registered = registrations(cfg.backends)
       const planned = planNames(registered.map((r) => ({ backend: r.backend, serverName: r.serverName })))
       expect(planned.map((p) => p.serverName)).toEqual(registered.map((r) => r.serverName))
     })
@@ -80,7 +81,7 @@ for (const { what, config: cfg } of scenarios) {
       // preferred backend and rebuild the others from a template, so with routing on it
       // reported a name the daemon had never registered -- and, for a config with an
       // explicit `serverName`, discarded the name the user chose.
-      const registered = registrations(cfg)
+      const registered = registrations(cfg.backends)
       const route = resolve(cfg.routing, registered)
       if (!route) {
         // Routing off: there is no decision to check, and that is the correct answer.
@@ -111,7 +112,7 @@ for (const { what, config: cfg } of scenarios) {
       //
       // So the expected list is built from the plan and the catalog's own tool names --
       // fixture data, not something `planTools` computed -- and compared exactly.
-      const registered = registrations(cfg)
+      const registered = registrations(cfg.backends)
       const route = resolve(cfg.routing, registered)
       const candidates = registered.map((r) => ({ backend: r.backend, serverName: r.serverName }))
       const cat = catalog(registered.map((r) => r.backend))
@@ -175,7 +176,7 @@ describe("what the rule actually decides", () => {
     // because "which backend is unqualified" is a question about the backends that can
     // answer -- not about the ones the config happens to mention.
     const cfg = config({ laya, julia, broken: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["x"] } })
-    const registered = registrations(cfg)
+    const registered = registrations(cfg.backends)
     const cat: Catalog = {
       backends: [{ backend: "laya", ...STUB_TOOLS.laya }, { backend: "broken", error: "connect refused" }],
     }
