@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install onesystem and a GPU model runtime.
+# Install onesystem: the OpenCode plugin, plus a model runtime if you want one.
 #
 #   curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
 #
@@ -66,6 +66,24 @@ die() {
   exit 1
 }
 
+REPLY=""
+
+# Sets REPLY to a model name, or empty for none.
+ask_model() {
+  if [[ ! -t 0 ]]; then
+    note "No terminal to ask on, so no model."
+    return 0
+  fi
+  note "  1) laya   2) julia   3) none"
+  printf '  %s? model [3]: ' "$YELLOW"
+  read -r REPLY || REPLY=""
+  case "${REPLY:-3}" in
+    1) REPLY="laya" ;;
+    2) REPLY="julia" ;;
+    *) REPLY="" ;;
+  esac
+}
+
 finish() {
   _clear
   printf '\n%s%s  ✓ Done%s\n' "$BOLD" "$GREEN" "$RESET"
@@ -84,7 +102,9 @@ TOTAL_STAGES=7
 REPO_URL="https://github.com/micahn/onesystem.git"
 # Keep this path stable: plugin registration uses an absolute path.
 INSTALL_DIR="${ONESYSTEM_DIR:-$HOME/.local/share/onesystem/repo}"
-MODEL="${ONESYSTEM_MODEL:-laya}"
+# Empty means ask, and "none" means do not install one. No default model: the plugin works
+# without one, and a several-GB download is not a thing to do unasked.
+MODEL="${ONESYSTEM_MODEL:-}"
 CONFIG_DIR="${ONESYSTEM_CONFIG_DIR:-$HOME/.config/onesystem}"
 CONFIG="$CONFIG_DIR/onesystem.jsonc"
 # Only suggest deleting source that this run cloned.
@@ -228,39 +248,68 @@ else
   DONE+=("config: $CONFIG (template)")
 fi
 
-stage "Model ($MODEL)"
+stage "Model"
 
-if bun run src/cli.ts runtimes 2>/dev/null | grep -qE "^${MODEL}[[:space:]]+ok"; then
-  ok "$MODEL runtime already installed"
+# The plugin registers and runs with no model at all, so this is a choice rather than a step.
+# The download is several GB, and doing it unasked is the installer's one real overreach.
+INSTALLED=$(bun run src/cli.ts runtimes 2>/dev/null | awk '$2 == "ok" { print $1 }' || true)
+CHOSEN="$MODEL"
+[[ -n "$INSTALLED" ]] && ok "already installed: $(tr '\n' ' ' <<<"$INSTALLED")"
+
+if [[ -z "$CHOSEN" || "$CHOSEN" == "none" ]]; then
+  if [[ -n "$INSTALLED" ]]; then
+    CHOSEN=""   # something is already there; do not ask what to add on top of it
+  else
+    ask_model
+    CHOSEN="$REPLY"
+  fi
+fi
+
+if [[ -z "$CHOSEN" ]]; then
+  if [[ -n "$INSTALLED" ]]; then
+    note "nothing to do"
+  else
+    note "no model installed. The plugin registers; its tools stay absent until you do."
+    SKIPPED+=("install a model: bun run src/cli.ts install laya")
+    [[ -t 0 ]] || SKIPPED+=("or set ONESYSTEM_MODEL=laya before running the installer")
+  fi
+elif grep -qx "$CHOSEN" <<<"$INSTALLED"; then
+  ok "$CHOSEN is already installed"
 else
-  note "Downloads PyTorch and builds a runtime. Allow several minutes."
-  step "onesystem install $MODEL"
-  bun run src/cli.ts install "$MODEL" || die "install $MODEL failed"
-  ok "$MODEL installed and configured"
-  DONE+=("model: $MODEL")
+  note "Downloads PyTorch and builds a runtime. Several GB, several minutes."
+  bun run src/cli.ts install "$CHOSEN" || die "install $CHOSEN failed"
+  ok "$CHOSEN installed and configured"
+  DONE+=("model: $CHOSEN")
+  INSTALLED="$CHOSEN"
 fi
 
 stage "opencode plugin"
 
-# Writes ~/.config/opencode/plugins/onesystem/{index,tui}.ts, each a one-line re-export of
-# the checkout. opencode discovers the directory itself, so opencode.json is not touched.
+# Writes <opencode-config-dir>/plugins/onesystem/{index,tui}.ts, each a one-line re-export
+# of the checkout. opencode discovers the directory itself, so opencode.json is not touched.
+PLUGIN_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/plugins/onesystem"
 if bun run src/cli.ts register-plugin; then
   DONE+=("plugin registered in opencode's plugins directory")
 else
-  SKIPPED+=("add the plugin by hand: create ~/.config/opencode/plugins/onesystem/ with index.ts and tui.ts")
+  SKIPPED+=("add the plugin by hand: create $PLUGIN_DIR with index.ts and tui.ts")
 fi
 
 stage "Verify"
 
-bun run src/cli.ts start >/dev/null 2>&1 || true
-sleep 1
-if bun run src/cli.ts status >/dev/null 2>&1; then
-  ok "daemon is up and answering"
-  note "  backends stay 'cold' until the first tool call"
-  note "  details: bun run src/cli.ts status"
+if [[ -z "$INSTALLED" ]]; then
+  ok "plugin registered; no model to start"
+  note "  bun run src/cli.ts install laya   then re-run this script"
 else
-  warn "the daemon did not come up. Run 'bun run src/cli.ts status' to see why."
-  SKIPPED+=("check: bun run src/cli.ts status")
+  bun run src/cli.ts start >/dev/null 2>&1 || true
+  sleep 1
+  if bun run src/cli.ts status >/dev/null 2>&1; then
+    ok "daemon is up and answering"
+    note "  backends stay 'cold' until the first tool call"
+    note "  details: bun run src/cli.ts status"
+  else
+    warn "the daemon did not come up. Run 'bun run src/cli.ts status' to see why."
+    SKIPPED+=("check: bun run src/cli.ts status")
+  fi
 fi
 
 finish
@@ -272,12 +321,18 @@ else
   UNINSTALL="rm -f '$CONFIG'   # and your own checkout of onesystem, if you want it gone"
 fi
 
+if [[ -n "$INSTALLED" ]]; then
+  COLD="The first tool call loads the model (~10-15s). Warm calls take tens of milliseconds."
+else
+  COLD="No model is installed, so the plugin has no tools yet. Install one with the command above."
+fi
+
 cat <<EOF
   ${BOLD}Restart OpenCode to load the plugin.${RESET}
 
-  The first tool call loads the model (~10-15s). Warm calls take tens of milliseconds.
+  $COLD
 
   ${DIM}To uninstall: $UNINSTALL
-  and delete ~/.config/opencode/plugins/onesystem/.${RESET}
+  and delete $PLUGIN_DIR/.${RESET}
 
 EOF

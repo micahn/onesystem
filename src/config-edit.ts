@@ -90,31 +90,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * The files that register this plugin with OpenCode: a directory under
- * `~/.config/opencode/plugins/` holding one entrypoint per half.
- *
- * A directory, not a file, because the plugin has two entrypoints and OpenCode finds the
- * second by name beside the first. `index.ts` is the server plugin, `tui.ts` is the status
- * line and install menu, and a TUI entrypoint is only loaded when it sits next to the server
- * one. A single `onesystem.ts` re-export loads the server half and silently drops the TUI
- * half, which looks like a working install with a missing footer.
- *
- * Both are re-exports of the checkout rather than copies. Autodetection does not follow a
- * symlink, and a copy is worse than unavailable: the plugin imports `../health.ts` and
- * friends and resolves its own CLI at `../cli.ts`, so a copy of `src/plugin/` alone does not
- * run, and a copy of the whole tree is a second, silently stale copy of the code the plugin
- * executes. A re-export always reads the checkout, so `git pull` takes effect on reload.
- *
- * Nothing here reads or writes `opencode.json`. An installer that edits a config it does not
- * own is a thing that goes wrong on somebody else's machine.
+ * The entrypoints OpenCode discovers, one file per plugin half. Re-exports of the checkout,
+ * so `git pull` is live and a moved checkout self-heals on the next run.
  */
 export function pluginAutoloadFiles(): {
   dir: string
   files: { path: string; contents: string }[]
 } {
-  // OPENCODE_CONFIG_DIR is the config directory, not the plugins directory: a plugin
-  // discovered from it sits at `<config-dir>/plugins/onesystem/`. Verified by pointing
-  // opencode at a sandbox with a plugin under its `plugins/`, which it found.
+  // OPENCODE_CONFIG_DIR is the config directory, so the plugins dir is a level under it.
   const base = process.env.OPENCODE_CONFIG_DIR ?? join(homedir(), ".config", "opencode")
   const dir = join(base, "plugins", "onesystem")
   const from = (name: string) => fileURLToPath(new URL(`../src/plugin/${name}.ts`, import.meta.url))

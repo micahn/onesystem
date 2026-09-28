@@ -310,8 +310,7 @@ async function cmdRegisterPlugin(): Promise<number> {
   try {
     await mkdir(dir, { recursive: true })
     for (const f of files) {
-      // Rewritten every run so a moved checkout self-heals, but only reported as a change
-      // when the bytes differ, so a re-run says "already" instead of touching a watcher.
+      // Counted before writing, so a re-run reports "already" and does not trip a watcher.
       if ((await readFile(f.path, "utf8").catch(() => "")) !== f.contents) wrote++
       await writeFile(f.path, f.contents)
     }
@@ -320,16 +319,10 @@ async function cmdRegisterPlugin(): Promise<number> {
     return 1
   }
 
+  const names = files.map((f) => f.path.slice(dir.length + 1)).join(", ")
   process.stdout.write(`${wrote === 0 ? "already registered" : "registered"}: ${dir}\n`)
-  process.stdout.write(`  ${files.map((f) => f.path.slice(dir.length + 1)).join(", ")}\n`)
-
-  // `opencode.json` is the user's file and is deliberately not read or written here. An
-  // installer that edits a config it does not own goes wrong on somebody else's machine,
-  // and this registration needs no config at all.
-  //
-  // `opencode plugin list` reports the server entrypoint only, so it cannot confirm the
-  // TUI half. The footer is the check for that.
-  process.stdout.write("  restart OpenCode, then check the footer\n")
+  process.stdout.write(`  ${names}\n`)
+  process.stdout.write("  restart OpenCode, then check the footer for the TUI half\n")
   return 0
 }
 

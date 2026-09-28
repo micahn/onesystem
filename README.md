@@ -13,13 +13,16 @@ uses mise to install Bun and uv if they are missing. See
 curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
 ```
 
-The installer clones to `~/.local/share/onesystem/repo`, installs laya, writes the
-config, and registers the plugin. You can run it again to update the checkout;
-it skips installed runtimes and asks before running `sudo`.
+The installer clones to `~/.local/share/onesystem/repo`, writes the config, and registers
+the plugin. It then asks whether to install a model runtime — a several-GB download — and
+defaults to no. Set `ONESYSTEM_MODEL=laya` or `julia` to skip the question, or
+`ONESYSTEM_MODEL=none` to make the skip explicit. You can run the installer again to update
+the checkout; it skips installed runtimes and asks before running `sudo`.
 
 Restart OpenCode, then run `opencode plugin list` to check that `onesystem` loaded, and
-look for the status line to confirm the TUI half. The first tool call loads the model. Warm
-calls take tens of milliseconds.
+look for the status line to confirm the TUI half. Without a model the plugin registers but
+has no tools. The first tool call loads the model, taking ~10-15s; warm calls take tens of
+milliseconds.
 
 [Manual install](#manual-install) · [Julia or a custom path](#installer-options) ·
 [Existing laya setup](#existing-laya-setup)
@@ -138,10 +141,10 @@ Set these variables before running the curl command:
 
 | Variable | Default | Use |
 | --- | --- | --- |
-| `ONESYSTEM_MODEL` | `laya` | Set to `julia` to install julia. |
+| `ONESYSTEM_MODEL` | asks | `laya` or `julia` to install that runtime, `none` to install no runtime. |
 | `ONESYSTEM_DIR` | `~/.local/share/onesystem/repo` | Choose the checkout path for a curl install. |
 
-For example, run `export ONESYSTEM_MODEL=julia`, then run the install command.
+For example, `export ONESYSTEM_MODEL=julia`, then run the install command.
 Running `bash install.sh` from a checkout uses that checkout.
 
 ### Manual install
@@ -154,15 +157,21 @@ cd onesystem
 bun install
 mkdir -p ~/.config/onesystem
 cp -n onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
-bun run src/cli.ts install laya
 bun run src/cli.ts register-plugin
+```
+
+That is the whole install. The plugin registers with no model; it has no tools until you
+install one:
+
+```sh
+bun run src/cli.ts install laya   # or julia
 bun run src/cli.ts start
 bun run src/cli.ts status
 ```
 
-Use `install julia` for julia. Add `--no-config` to print the config block instead
-of writing it, or `--lock-only` to resolve dependencies without installing the runtime.
-Backends should show `cold` until the first call.
+Add `--no-config` to print the config block instead of writing it, or `--lock-only` to
+resolve dependencies without installing the runtime. Backends should show `cold` until the
+first call.
 
 Registration writes `~/.config/opencode/plugins/onesystem/`, one file per entrypoint,
 each re-exporting this checkout:
