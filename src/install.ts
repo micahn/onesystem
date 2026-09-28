@@ -28,6 +28,23 @@
  * solver, and adding one to a project whose entire premise is "one process, shared
  * weights" would be absurd.
  *
+ * ## Everything goes through the project's one subprocess seam
+ *
+ * This module used to have a private `run()` with no deadline, no kill, and no
+ * cancellation, accumulating output into unbounded strings. `onesystem install` is the
+ * longest-running command in the project — it downloads several gigabytes and spends
+ * minutes inside `uv` — so a hung `uv lock` on a flaky network, a wedged `uv sync`, or a
+ * `verify()` whose `import torch` stalls behind a busy GPU left it waiting forever with no
+ * diagnostic. The daemon had already solved the deadline problem and expressed it once, in
+ * `async.ts`; this was a third, weaker answer to the same question.
+ *
+ * So the runner is `src/subprocess.ts`, shared, and it is *threaded* rather than imported
+ * at each site: `install`, `detectGpu` and `verify` all take a `Runner`. That is what makes
+ * the sequence below testable, which matters because the sequence is this module's actual
+ * subject — twelve steps whose order is the whole of its crash-safety argument, and which
+ * no test could reach before. `test/install-steps.test.ts` drives the whole thing against a
+ * script, detection included.
+ *
  * ## Detection fails closed
  *
  * If the GPU cannot be positively identified, nothing is installed. The alternative —
@@ -40,7 +57,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { spawn } from "node:child_process"
+import { DEFAULT_TIMEOUT_MS, type Runner } from "./subprocess.ts"
 import type { ModelSpec } from "./models.ts"
 
 /**
@@ -114,24 +131,14 @@ export function runtimeDir(model: string): string {
   return join(runtimesRoot(), model)
 }
 
-function run(cmd: string, args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-  return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      env: { ...process.env, ...opts.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    let stdout = ""
-    let stderr = ""
-    child.stdout?.on("data", (d) => (stdout += String(d)))
-    child.stderr?.on("data", (d) => (stderr += String(d)))
-    child.on("error", (err) => resolve({ code: 127, stdout, stderr: String(err) }))
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }))
-  })
-}
-
-async function have(cmd: string): Promise<boolean> {
-  const { code } = await run("sh", ["-c", `command -v ${cmd}`])
+/**
+ * Ask whether a command exists.
+ *
+ * `sh -c "command -v X"` rather than a spawn of `X` itself: probing a binary by running
+ * it is not a probe, and the shell form is the one that answers without side effects.
+ */
+async function have(cmd: string, runner: Runner): Promise<boolean> {
+  const { code } = await runner("sh", ["-c", `command -v ${cmd}`])
   return code === 0
 }
 
@@ -142,9 +149,16 @@ async function have(cmd: string): Promise<boolean> {
  * prints it directly on this machine. `/sys/class/kdev` is not used: it is a Tegra path
  * and does not exist here, so a detection ladder that includes it is a ladder that fails
  * on a machine that has a perfectly good GPU.
+ *
+ * Detection is a sequence of subprocesses, so it takes the runner rather than reaching for
+ * one. That is not only for tests: it is what lets a scripted runner stand in for the whole
+ * machine, and `test/install.test.ts` drives an entire install — detection included — by
+ * answering `lspci` and `rocm-smi` from a script.
  */
-export async function detectGpu(): Promise<Gpu> {
-  const lspci = await have("lspci") ? await run("sh", ["-c", "lspci | grep -iE 'vga|3d|display'"]) : null
+export async function detectGpu(runner: Runner): Promise<Gpu> {
+  const lspci = await have("lspci", runner)
+    ? await runner("sh", ["-c", "lspci | grep -iE 'vga|3d|display'"])
+    : null
   const vendorLine = lspci?.stdout ?? ""
 
   if (/NVIDIA/i.test(vendorLine)) return { vendor: "nvidia" }
@@ -156,8 +170,8 @@ export async function detectGpu(): Promise<Gpu> {
   }
 
   let gfx: string | undefined
-  if (await have("rocm-smi")) {
-    const out = await run("rocm-smi", ["--showproductname"])
+  if (await have("rocm-smi", runner)) {
+    const out = await runner("rocm-smi", ["--showproductname"])
     gfx = out.stdout.match(/GFX Version:\s*(gfx\w+)/i)?.[1]
   }
   if (!gfx) {
@@ -177,13 +191,22 @@ export async function detectGpu(): Promise<Gpu> {
  * A source pin for a package that is merely transitive does nothing, silently — which
  * looks exactly like the pin working right up until CUDA torch is what gets installed.
  *
- * The AMD branch is the tested one; this machine has no NVIDIA card. The NVIDIA branch is
+ * The AMD branch is the one this machine can check, and both are now tested because the
+ * signature no longer supplies a default to fall back on. The NVIDIA branch is
  * deliberately the *absence* of work: PyPI's default Linux torch wheel is already the
  * CUDA build, so naming no accelerator index is the correct configuration rather than an
  * omitted one. That is also why it needs no cu-version decision, which from a machine
  * that cannot check one would be a guess dressed as a default.
+ *
+ * `gpu` is required, and that is the point. It used to default to
+ * `{ vendor: "amd", gfx: "gfx1201" }` — this machine's card — so a caller on an NVIDIA box
+ * could write `pyprojectFor(spec)` and get an AMD manifest: ROCm index, `triton-rocm`, and
+ * a `gfx1201` arch check, for a card that is not there. A defaulted hardware fact in a
+ * public signature is a signature that permits a lie, and it is also why the NVIDIA branch
+ * had no coverage at all: the only test on this machine called it with no argument and got
+ * the default, so the branch nobody here can run was the one nobody exercised.
  */
-export function pyprojectFor(spec: ModelSpec, gpu: Gpu = { vendor: "amd", gfx: "gfx1201" }): string {
+export function pyprojectFor(spec: ModelSpec, gpu: Gpu): string {
   // A model that has to be fetched is installed from the local copy the fetch step left,
   // not from its repository — see ModelSpec#source for why a git source does not work.
   // A fetched model is pinned by the revision recorded in meta.json, not by a version
@@ -197,6 +220,21 @@ export function pyprojectFor(spec: ModelSpec, gpu: Gpu = { vendor: "amd", gfx: "
   const requirement = local ? spec.requirement.replace(/==.*/, "") : spec.requirement
   const declared = [requirement, ...extra]
 
+  // A model that was fetched is installed from the local copy, and that pin is
+  // orthogonal to the accelerator: it says where the *package* came from, not which
+  // wheel index to look in.
+  //
+  // It used to be written only into the AMD template, so the NVIDIA branch declared a
+  // fetched model by name and version and nothing else — `dependencies = ["supersonic-
+  // julia"]` with no `[tool.uv.sources]`, asking PyPI for a package that is not on PyPI.
+  // `uv lock` would fail on any NVIDIA machine trying to install julia, with a resolution
+  // error that says nothing about a manifest this file wrote. The branch had no coverage,
+  // which is the only reason it survived: the default in the signature meant the AMD
+  // manifest was the only one anybody here could produce.
+  const localSource = local
+    ? `\n[tool.uv.sources]\n${requirement} = { path = "${local}" }\n`
+    : ""
+
   if (gpu.vendor !== "amd") {
     return `# Generated by \`onesystem install ${spec.name}\`. Edits will be overwritten.
 [project]
@@ -208,7 +246,7 @@ dependencies = [${declared.map((d) => `"${d}"`).join(", ")}]
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
-`
+${localSource}`
   }
 
   return `# Generated by \`onesystem install ${spec.name}\`. Edits will be overwritten.
@@ -228,7 +266,7 @@ ${declared.map((d) => `  "${d}",`).join("\n")}
 environments = ["sys_platform == 'linux'"]
 
 [tool.uv.sources]
-${local ? `${spec.requirement.replace(/==.*/, "")} = { path = "${local}" }
+${local ? `${requirement} = { path = "${local}" }
 ` : ""}torch = { index = "${ROCM_INDEX.name}" }
 triton-rocm = { index = "${ROCM_INDEX.name}" }
 pytorch-triton-rocm = { index = "${ROCM_INDEX.name}" }
@@ -284,9 +322,27 @@ export function assertNoAcceleratorMixups(lock: string, gpu: Gpu): void {
 }
 
 export interface InstallOptions {
+  /**
+   * The project's subprocess seam.
+   *
+   * Required rather than defaulted to the real `run`, deliberately. A default here is the
+   * same shape of trap as the defaulted `gpu` this module used to carry: it makes the
+   * mocked path the one you get by accident, and it means the seven call sites below can
+   * each quietly reach for a different runner. One caller (`cmdInstall`) passes the real
+   * one; a test passes a script.
+   */
+  runner: Runner
   /** Skip the download and only resolve. Useful for checking a manifest. */
   lockOnly?: boolean
   onProgress?: (message: string) => void
+  /**
+   * Deadline for each of the install's subprocesses.
+   *
+   * One knob rather than four because they are the same kind of wait — a build step making
+   * network requests — and a caller with a slow link has one problem, not four. Generous
+   * by default; it is here to stop a hang, not to police a download.
+   */
+  timeoutMs?: number
 }
 
 /**
@@ -295,12 +351,21 @@ export interface InstallOptions {
  * Written last, not first: a directory with a `meta.json` is a finished install, and one
  * without is garbage from a killed run. `listRuntimes` treats the second as absent, so a
  * half-install is invisible rather than half-working.
+ *
+ * Every step is a subprocess, which is what makes this function's real subject — the
+ * *order* — testable at all. It was written last, in an order chosen carefully, and read by
+ * nobody who could check it: the crash-safety argument below rests entirely on staging and
+ * `meta.json` being the only things that make a directory look installed, and not one line
+ * of it was reachable from a test. `test/install.test.ts` now runs the whole thing against
+ * a scripted runner, including the paths that used to be untestable and mattered most:
+ * `uv sync` failing, `verify()` failing, and what is left on disk when either happens.
  */
-export async function install(spec: ModelSpec, options: InstallOptions = {}): Promise<Runtime> {
-  if (!(await have("uv"))) {
+export async function install(spec: ModelSpec, options: InstallOptions): Promise<Runtime> {
+  const { runner, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  if (!(await have("uv", runner))) {
     throw new Error("uv is not on PATH. Install it from https://docs.astral.sh/uv/ — it is the only dependency.")
   }
-  const gpu = await detectGpu()
+  const gpu = await detectGpu(runner)
 
   const dir = runtimeDir(spec.name)
   const say = options.onProgress ?? (() => {})
@@ -312,45 +377,74 @@ export async function install(spec: ModelSpec, options: InstallOptions = {}): Pr
   await rm(staging, { recursive: true, force: true })
   await mkdir(staging, { recursive: true })
 
-  let revision: string | undefined
-  if (spec.source) {
-    revision = await fetchModelSource(spec, join(staging, `${spec.name}-src`), say)
+  // Everything from here to the rename is inside this, and the removal on the way out is
+  // the module's crash-safety claim made true rather than merely asserted.
+  //
+  // It used to remove the staging directory in exactly one place — the `verify` failure —
+  // while `uv lock` failing, `uv sync` failing, a fetch failing, and a dependency check
+  // throwing all left it behind. That was survivable, because `listRuntimes` skips
+  // `.partial` and the next install removes it before starting, but it left the directory
+  // holding claim to be *the* invariant: no directory with a `meta.json`, and no
+  // `<name>.partial`, exists after any failure past staging. It was true of the one path
+  // it was written for and false of the other four, and the comment claiming it was not
+  // checked by anything. Now it is one `catch`, and it holds for all of them.
+  //
+  // Weights are deliberately not in staging and are not touched here: they are fetched to
+  // their own directory precisely so they survive a failed install.
+  try {
+    let revision: string | undefined
+    if (spec.source) {
+      revision = await fetchModelSource(spec, join(staging, `${spec.name}-src`), say, runner, timeoutMs)
+    }
+    if (spec.weights) {
+      // Fetched outside the staging directory, because the weights outlive this install and
+      // the directory does not.
+      await fetchWeights(spec, weightsDir(spec.name), say, runner, timeoutMs)
+    }
+    await writeFile(join(staging, "pyproject.toml"), pyprojectFor(spec, gpu))
+
+    // The two steps that can hang for minutes, each with its own name in the failure. A
+    // bare "timed out" tells a user nothing they can act on, and `uv lock` and `uv sync`
+    // fail for entirely different reasons — one is resolution, the other is the download.
+    const lock = await runner("uv", ["lock"], { cwd: staging, timeoutMs })
+    if (lock.timedOut) throw new Error(`uv lock did not finish within ${timeoutMs}ms`)
+    if (lock.code !== 0) throw new Error(`uv lock failed:\n${lock.stderr.trim()}`)
+    assertNoAcceleratorMixups(await readFile(join(staging, "uv.lock"), "utf8"), gpu)
+    say("resolved, no NVIDIA packages")
+
+    if (options.lockOnly) {
+      // Deliberately not published. Nothing was installed, and a directory that exists
+      // without a meta.json is exactly what `runtimes` reports as a half-install.
+      await rm(staging, { recursive: true, force: true })
+      return { name: spec.name, dir, python: pythonIn(dir), installed: false }
+    }
+
+    const sync = await runner("uv", ["sync", "--frozen"], { cwd: staging, timeoutMs })
+    if (sync.timedOut) throw new Error(`uv sync did not finish within ${timeoutMs}ms`)
+    if (sync.code !== 0) throw new Error(`uv sync failed:\n${sync.stderr.trim()}`)
+    const check = await verify(staging, gpu, runner, timeoutMs)
+    if (!check.ok) {
+      // The `catch` below removes the staging directory; an environment that failed its
+      // own checks is never published, and never left behind for `listRuntimes` to
+      // reason about.
+      throw new Error(`the installed environment failed its checks:\n  ${check.problems.join("\n  ")}`)
+    }
+
+    // The published directory is replaced, not merged, and only once there is something
+    // verified to put in it. `rm` before `rename` is what makes this atomic from the
+    // reader's side: `dir` is either the old runtime or absent, never half of each.
+    await rm(dir, { recursive: true, force: true })
+    await writeFile(
+      join(staging, "meta.json"),
+      JSON.stringify({ model: spec.name, gfx: gpu.gfx, created: new Date().toISOString(), revision }, null, 2),
+    )
+    await rename(staging, dir)
+
+    return { name: spec.name, dir, python: pythonIn(dir), installed: true }
+  } catch (err) {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
+    throw err
   }
-  if (spec.weights) {
-    // Fetched outside the staging directory, because the weights outlive this install and
-    // the directory does not.
-    await fetchWeights(spec, weightsDir(spec.name), say)
-  }
-  await writeFile(join(staging, "pyproject.toml"), pyprojectFor(spec, gpu))
-
-  const lock = await run("uv", ["lock"], { cwd: staging })
-  if (lock.code !== 0) throw new Error(`uv lock failed:\n${lock.stderr.trim()}`)
-  assertNoAcceleratorMixups(await readFile(join(staging, "uv.lock"), "utf8"), gpu)
-  say("resolved, no NVIDIA packages")
-
-  if (options.lockOnly) {
-    // Deliberately not published. Nothing was installed, and a directory that exists
-    // without a meta.json is exactly what `runtimes` reports as a half-install.
-    await rm(staging, { recursive: true, force: true })
-    return { name: spec.name, dir, python: pythonIn(dir), installed: false }
-  }
-
-  const sync = await run("uv", ["sync", "--frozen"], { cwd: staging })
-  if (sync.code !== 0) throw new Error(`uv sync failed:\n${sync.stderr.trim()}`)
-  const check = await verify(staging, gpu)
-  if (!check.ok) {
-    await rm(staging, { recursive: true, force: true })
-    throw new Error(`the installed environment failed its checks:\n  ${check.problems.join("\n  ")}`)
-  }
-
-  await rm(dir, { recursive: true, force: true })
-  await writeFile(
-    join(staging, "meta.json"),
-    JSON.stringify({ model: spec.name, gfx: gpu.gfx, created: new Date().toISOString(), revision }, null, 2),
-  )
-  await rename(staging, dir)
-
-  return { name: spec.name, dir, python: pythonIn(dir), installed: true }
 }
 
 /**
@@ -360,7 +454,13 @@ export async function install(spec: ModelSpec, options: InstallOptions = {}): Pr
  * tool here, and the runtime must not carry a dependency the model does not have. uv
  * caches it, so repeat installs cost nothing.
  */
-async function fetchModelSource(spec: ModelSpec, into: string, say: (m: string) => void): Promise<string> {
+async function fetchModelSource(
+  spec: ModelSpec,
+  into: string,
+  say: (m: string) => void,
+  runner: Runner,
+  timeoutMs: number,
+): Promise<string> {
   const { repo, allow } = spec.source!
   say(`fetching ${repo} (package only)`)
   const script = [
@@ -369,14 +469,23 @@ async function fetchModelSource(spec: ModelSpec, into: string, say: (m: string) 
     `p = snapshot_download(${JSON.stringify(repo)}, local_dir=sys.argv[1], allow_patterns=${JSON.stringify(allow)})`,
     "print(json.dumps({'path': p}))",
   ].join("\n")
-  const { code, stdout, stderr } = await run("uv", ["run", "--quiet", "--with", "huggingface_hub", "python", "-c", script, into])
-  if (code !== 0) {
-    throw new Error(`could not fetch ${repo}:\n${stderr.trim().slice(-600)}`)
+  const res = await runner("uv", ["run", "--quiet", "--with", "huggingface_hub", "python", "-c", script, into], {
+    timeoutMs,
+  })
+  if (res.timedOut) throw new Error(`fetching ${repo} did not finish within ${timeoutMs}ms`)
+  if (res.code !== 0) {
+    throw new Error(`could not fetch ${repo}:\n${res.stderr.trim().slice(-600)}`)
   }
-  return stdout.trim().split("\n").pop() ?? ""
+  return res.stdout.trim().split("\n").pop() ?? ""
 }
 
-async function fetchWeights(spec: ModelSpec, into: string, say: (m: string) => void): Promise<void> {
+async function fetchWeights(
+  spec: ModelSpec,
+  into: string,
+  say: (m: string) => void,
+  runner: Runner,
+  timeoutMs: number,
+): Promise<void> {
   if (existsSync(join(into, ".complete"))) {
     say(`weights already present in ${into}`)
     return
@@ -387,9 +496,16 @@ async function fetchWeights(spec: ModelSpec, into: string, say: (m: string) => v
     "from huggingface_hub import snapshot_download",
     `snapshot_download(${JSON.stringify(spec.weights!.repo)}, local_dir=sys.argv[1])`,
   ].join("\n")
-  const { code, stderr } = await run("uv", ["run", "--quiet", "--with", "huggingface_hub", "python", "-c", script, into])
-  if (code !== 0) throw new Error(`could not fetch weights for ${spec.name}:\n${stderr.trim().slice(-600)}`)
-  // Written last, so an interrupted download is retried rather than trusted.
+  const res = await runner("uv", ["run", "--quiet", "--with", "huggingface_hub", "python", "-c", script, into], {
+    timeoutMs,
+  })
+  if (res.timedOut) throw new Error(`fetching weights for ${spec.name} did not finish within ${timeoutMs}ms`)
+  if (res.code !== 0) throw new Error(`could not fetch weights for ${spec.name}:\n${res.stderr.trim().slice(-600)}`)
+  // Written last, so an interrupted download is retried rather than trusted. This is the
+  // whole of the resume story, and it is a single file's existence: no `.complete` means
+  // 550 MB is fetched again, which is expensive and correct. A run killed between the
+  // download and this line re-downloads, and there is no state in which a partial
+  // checkpoint looks complete.
   await writeFile(join(into, ".complete"), new Date().toISOString())
 }
 
@@ -403,8 +519,18 @@ export function pythonIn(dir: string): string {
  * The cheap discriminator is `torch.version.cuda is None`: a ROCm build reports no CUDA
  * version and does have a HIP one. Everything else here is a refinement, but they are what
  * turn "wrong build" from a silent 40x slowdown into an error at install time.
+ *
+ * Exported because `onesystem doctor` runs it against an already-installed runtime, and it
+ * takes the runner for the same reason `install` does: this is the step whose `import
+ * torch` can hang behind a busy GPU, and a test cannot reach any of the branches below
+ * without being able to answer with a torch that has the wrong properties.
  */
-export async function verify(dir: string, gpu: Gpu): Promise<{ ok: boolean; problems: string[]; torch?: string }> {
+export async function verify(
+  dir: string,
+  gpu: Gpu,
+  runner: Runner,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; problems: string[]; torch?: string }> {
   const python = pythonIn(dir)
   if (!existsSync(python)) return { ok: false, problems: [`no interpreter at ${python}`] }
 
@@ -419,14 +545,19 @@ export async function verify(dir: string, gpu: Gpu): Promise<{ ok: boolean; prob
     "print(json.dumps(out))",
   ].join("\n")
 
-  const { code, stdout, stderr } = await run(python, ["-c", script])
-  if (code !== 0) return { ok: false, problems: [`could not import torch: ${stderr.trim().slice(-400)}`] }
+  const res = await runner(python, ["-c", script], { timeoutMs })
+  if (res.timedOut) {
+    // Worth its own message. `import torch` on a busy GPU can take a while, and "timed
+    // out" with no hint reads like a wedged process rather than a slow import.
+    return { ok: false, problems: [`importing torch did not finish within ${timeoutMs}ms`] }
+  }
+  if (res.code !== 0) return { ok: false, problems: [`could not import torch: ${res.stderr.trim().slice(-400)}`] }
 
   let info: { hip: string | null; cuda: string | null; available: boolean; arch: string[] }
   try {
-    info = JSON.parse(stdout.trim().split("\n").pop()!)
+    info = JSON.parse(res.stdout.trim().split("\n").pop()!)
   } catch {
-    return { ok: false, problems: [`torch did not report readable state: ${stdout.trim().slice(-200)}`] }
+    return { ok: false, problems: [`torch did not report readable state: ${res.stdout.trim().slice(-200)}`] }
   }
 
   const problems: string[] = []

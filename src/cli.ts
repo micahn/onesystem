@@ -46,6 +46,7 @@ import { backendStates, editConfig, setEnabled } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
 import { configHint, detectGpu, install, listRuntimes, runtimeDir, runtimesRoot, uninstall, verify } from "./install.ts"
 import { logger } from "./log.ts"
+import { run } from "./subprocess.ts"
 
 const log = logger("cli")
 
@@ -203,13 +204,13 @@ async function cmdInstall(args: string[]): Promise<number> {
   const spec = findModel(name)
   const lockOnly = rest.includes("--lock-only")
   try {
-    const runtime = await install(spec, { lockOnly, onProgress: (m) => log.info(m) })
+    const runtime = await install(spec, { runner: run, lockOnly, onProgress: (m) => log.info(m) })
     if (lockOnly) {
       log.info("resolved only; nothing downloaded", { model: name })
       return 0
     }
-    const gpu = await detectGpu()
-    const check = await verify(runtime.dir, gpu)
+    const gpu = await detectGpu(run)
+    const check = await verify(runtime.dir, gpu, run)
     process.stdout.write(`installed ${name}\n  interpreter: ${runtime.python}\n`)
     if (spec.interpreterEnv) {
       process.stdout.write(`\nadd to your config so the backend uses it:\n${configHint(spec, runtime)}\n`)
@@ -258,7 +259,7 @@ async function cmdUninstall(args: string[]): Promise<number> {
  * neither is obvious until you time a call.
  */
 async function cmdDoctor(args: string[]): Promise<number> {
-  const gpu = await detectGpu()
+  const gpu = await detectGpu(run)
   process.stdout.write(`gpu: ${gpu.vendor}${gpu.gfx ? ` (${gpu.gfx})` : ""}\n`)
   const targets = args.length > 0 ? [args[0]!] : (await listRuntimes()).map((r) => r.name)
   if (targets.length === 0) {
@@ -267,7 +268,7 @@ async function cmdDoctor(args: string[]): Promise<number> {
   }
   let bad = 0
   for (const name of targets) {
-    const check = await verify(runtimeDir(name), gpu)
+    const check = await verify(runtimeDir(name), gpu, run)
     if (check.ok) {
       process.stdout.write(`${name}: ok${check.torch ? ` (torch hip ${check.torch})` : ""}\n`)
     } else {

@@ -20,7 +20,7 @@ const lock = (versions: Record<string, string>) =>
     .join("\n")
 
 describe("the manifest", () => {
-  const toml = pyprojectFor(findModel("laya"))
+  const toml = pyprojectFor(findModel("laya"), amd)
 
   test("torch is pinned to the ROCm index, not just to a version", () => {
     // The distinction the whole module exists for. A constraint file pins `torch==2.14.0`
@@ -98,6 +98,42 @@ describe("refusing an NVIDIA build on an AMD card", () => {
     // perfectly correct install.
     const cuda = lock({ torch: "2.14.0", "nvidia-cudnn-cu13": "9.24.0.43" })
     expect(() => assertNoAcceleratorMixups(cuda, { vendor: "nvidia" })).not.toThrow()
+  })
+})
+
+describe("the manifest on an NVIDIA card", () => {
+  // This branch had no coverage at all, and the reason was in the signature rather than in
+  // anybody's diligence: `gpu` defaulted to this machine's AMD card, so the one test on
+  // this machine called `pyprojectFor(spec)` and got the default. The NVIDIA path was
+  // unreachable without a second machine.
+  //
+  // That also made the signature a trap rather than a convenience. On an NVIDIA box,
+  // `pyprojectFor(spec)` produced an AMD manifest — ROCm index, `triton-rocm`, and a
+  // `gfx1201` arch check — for a card that is not there. The parameter is required now, so
+  // the lie is a compile error and this test can be written on any machine at all.
+  const cuda = { vendor: "nvidia" } as const
+  const toml = pyprojectFor(findModel("laya"), cuda)
+
+  test("it names no accelerator index, because PyPI's linux torch already is the CUDA build", () => {
+    // The absence of work is the correct configuration here, not an omission. This is the
+    // mirror of the AMD manifest's whole argument.
+    expect(toml).not.toContain(ROCM_INDEX.url)
+    expect(toml).not.toContain(ROCM_INDEX.name)
+    expect(toml).not.toMatch(/rocm/i)
+    // And so no `explicit` index, which on this branch would be a no-op at best.
+    expect(toml).not.toContain("explicit = true")
+  })
+
+  test("the model is still pinned exactly, because the pin is not about the accelerator", () => {
+    expect(toml).toMatch(/laya\[mcp\]==\d+\.\d+\.\d+/)
+  })
+
+  test("a fetched model is installed from its local copy there too", () => {
+    // The source-pin logic is shared by both branches, so it is worth one assertion that it
+    // did not get lost when the branch was untested.
+    const julia = pyprojectFor(findModel("julia"), cuda)
+    expect(julia).toContain('supersonic-julia = { path = "julia-src" }')
+    expect(julia).toContain('"mcp"')
   })
 })
 
