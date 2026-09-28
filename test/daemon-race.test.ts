@@ -116,22 +116,74 @@ describe("the lock race, between two real processes", () => {
     dirs.push(dir)
     const lockFile = join(dir, "daemon.lock")
 
-    // A real configured port, because that is the case the check is for: the lock records
-    // the port the daemon intends to serve on, and a daemon on `port: 0` records a zero
-    // that nothing can be checked against. The shipped config always names a port.
-    const port = 45_000 + Math.floor(Math.random() * 2_000)
-    const live = await runDaemon(testConfig(port), {
+    // `port: 0`, not a hand-picked one. This file used to reach for
+    // `45_000 + random()` with a comment explaining that a zero port "records a zero that
+    // nothing can be checked against" — documenting a hole instead of closing it, and
+    // leaving the file's only real flake source in place. The lock now records the bound
+    // port, so the kernel chooses a free one and there is nothing to collide with.
+    const live = await runDaemon(testConfig(0), {
       lockFile,
       handleSignals: false,
       backends: fakePort({ a: new FakeBackend({ name: "a" }) }),
     })
     cleanups.push(() => live.close())
-    expect(live.port).toBe(port)
+    expect(live.port).toBeGreaterThan(0)
 
     // Rewrite the record with a pid that cannot be alive, keeping the real port.
     const record = JSON.parse(await Bun.file(lockFile).text()) as { pid: number; port: number }
-    expect(record.port).toBe(port)
+    expect(record.port).toBe(live.port)
     await Bun.write(lockFile, JSON.stringify({ ...record, pid: 0x7ffffffe, startedAt: new Date().toISOString() }))
+
+    const previous = process.exitCode
+    process.exitCode = undefined
+    try {
+      await expect(
+        runDaemon(testConfig(0), {
+          lockFile,
+          handleSignals: false,
+          backends: fakePort({ a: new FakeBackend({ name: "a" }) }),
+        }),
+      ).rejects.toBeInstanceOf(LockBusy)
+      expect(process.exitCode as number | undefined).toBe(LOCK_BUSY_EXIT)
+    } finally {
+      process.exitCode = previous
+    }
+  }, 20_000)
+
+  test("a dead daemon on port 0 leaves a lock that cannot be stolen on the pid alone", async () => {
+    // The case the port check was silently absent from, and the configuration this project
+    // actually uses: `port: 0` means "let the kernel pick", so the port the lock recorded
+    // before the bind was a zero. `servingOn(0)` connects nowhere and returns false, so the
+    // steal proceeded on the pid alone — precisely the failure the check exists to prevent,
+    // and it produced two daemons sharing a GPU rather than any visible error.
+    //
+    // A daemon that re-execs, or one whose pid was recycled, leaves a lock whose pid is
+    // provably gone while the process is very much alive and serving. Written with the
+    // *dead* pid of a daemon that was on `port: 0`, so a passing test cannot come from the
+    // check short-circuiting on a readable, genuinely-dead port.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
+    dirs.push(dir)
+    const lockFile = join(dir, "daemon.lock")
+
+    // Start on port 0, so the lock's own record is the one under test, and keep the daemon
+    // serving while we forge a dead pid into its record.
+    const live = await runDaemon(testConfig(0), {
+      lockFile,
+      handleSignals: false,
+      backends: fakePort({ a: new FakeBackend({ name: "a" }) }),
+    })
+    cleanups.push(() => live.close())
+
+    const recorded = JSON.parse(await Bun.file(lockFile).text()) as { pid: number; port: number }
+    // The mechanism under test: the record holds the port that was actually bound, not the
+    // zero the config asked for. Without this the case below is unreachable.
+    expect(recorded.port).toBe(live.port)
+    expect(recorded.port).not.toBe(0)
+
+    await Bun.write(
+      lockFile,
+      JSON.stringify({ ...recorded, pid: 0x7ffffffe, startedAt: new Date().toISOString() }),
+    )
 
     const previous = process.exitCode
     process.exitCode = undefined

@@ -115,6 +115,12 @@ export async function runDaemon(config: Config, options: DaemonOptions = {}): Pr
     throw err
   }
 
+  // The lock recorded `config.port`, which is not necessarily the port just bound: `port: 0`
+  // asks the kernel to choose one, and that is what every test in this repo does. Until the
+  // real port is written back, the record is a zero and the steal-safety check that depends
+  // on it silently passes. See Lease#record.
+  await lease.record(daemon.port)
+
   // The idle window starts counting from daemon start, but only fires once a model has
   // actually been loaded and then gone quiet. See Supervisor#sweep.
   backends.watchIdle(() => {

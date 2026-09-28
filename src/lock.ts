@@ -22,16 +22,26 @@
  * cleanup handler), so `acquire` reads the recorded pid and steals the lock when that
  * pid is provably gone.
  *
- * Stealing is only safe because the holder's port is also checked, and that check used
- * to be documented here and implemented nowhere. The record has always carried the
- * daemon's port and no reader ever parsed it, so the safety argument for the steal path
- * rested on a fact nothing in this file looked at. It does now: before reclaiming a lock
- * whose pid is gone, `acquire` connects to the recorded port. A dead pid with a live
+ * Stealing is only safe because the holder's port is also checked. A dead pid with a live
  * listener means the daemon is serving under a pid we cannot see, and reclaiming on the
  * strength of the pid alone is exactly how two daemons end up sharing a GPU.
+ *
+ * That check was documented here and implemented nowhere for a long time, and when it was
+ * implemented it worked for exactly one configuration. The record is written before the
+ * listener binds — it has to be, since the lock is what stops two daemons racing for the
+ * port — so it held the port the daemon *intended* to use. `port: 0` means "let the kernel
+ * pick", so such a record held a zero: `servingOn(0)` connects nowhere, returns false, and
+ * the steal proceeded on the pid alone, silently, in the one configuration the project
+ * itself prefers. `Lease#record` closes that, so the value is the bound port rather than
+ * the requested one.
+ *
+ * The same principle the grace window above establishes — "we cannot tell" is not "it is
+ * gone" — is why an unreadable port skips the check rather than failing it. A record we
+ * cannot read is a lock we do not understand, and refusing to reclaim those would wedge the
+ * daemon behind a lock file nobody can clear.
  */
 
-import { open, mkdir, readFile, stat, unlink } from "node:fs/promises"
+import { open, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
 import { connect } from "node:net"
 import { dirname } from "node:path"
 import { describeError } from "./async.ts"
@@ -74,6 +84,22 @@ const UNKNOWN_GRACE_MS = 3_000
 
 export interface Lease {
   path: string
+  /**
+   * Record the port actually bound, now it is known.
+   *
+   * The record is written at acquire time, which is *before* the listener binds — and it
+   * has to be, because the lock is what stops two daemons racing for the port at all. So
+   * the value written then is the port the daemon intends to use, which is not necessarily
+   * the one it got: `port: 0` means "let the kernel pick", and every test in this repo uses
+   * it. A lock holding `0` can never be checked, so `servingOn(0)` connects to a meaningless
+   * port, returns false, and the steal proceeds on the pid alone — turning off the exact
+   * check the steal is only safe because of.
+   *
+   * So the caller reports the real port back once the listener is up. After that the
+   * recorded port is a fact rather than an intention, and the steal check works for a
+   * daemon that asked the kernel for a port as well as one that named it.
+   */
+  record(port: number): Promise<void>
   release(): Promise<void>
 }
 
@@ -180,14 +206,35 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
     try {
       // O_CREAT|O_EXCL|O_WRONLY. Atomic: the kernel guarantees a single winner.
       const handle = await open(path, "wx")
-      const record = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), ...info })
-      await handle.writeFile(record)
+      const startedAt = new Date().toISOString()
+      let extra = info
+      const write = async () => {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt, ...extra }))
+      }
+      await write()
       await handle.close()
       log.info("acquired", { path, pid: process.pid })
 
       let released = false
       return {
         path,
+        record: async (port: number) => {
+          if (released) return
+          try {
+            const current = await readHolder(path)
+            // Only rewrite our own record. A successor that already reclaimed the lock owns
+            // that file now, and overwriting it with our pid would strand their guard and
+            // leave a lock nobody can ever take.
+            if (current.pid !== process.pid) return
+            extra = { ...extra, port }
+            await writeFile(path, JSON.stringify({ pid: process.pid, startedAt, ...extra }))
+            log.debug("recorded bound port", { path, port })
+          } catch (err) {
+            // Not fatal. A lock we cannot update still stops concurrent daemons; it just
+            // cannot be port-checked, which is the same position a legacy record is in.
+            log.warn("could not record the bound port", { path, error: describeError(err) })
+          }
+        },
         release: async () => {
           if (released) return
           released = true
