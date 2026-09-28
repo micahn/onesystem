@@ -59,7 +59,7 @@ export function planTools(catalog: Catalog, candidates?: NameCandidate[], prefer
       tools.push({
         name,
         backend: entry.backend,
-        // /call expects the backend's original, prefixed name.
+        // The wire name, as /catalog advertises it. /call takes this or the bare one.
         tool: t.name,
         description: t.description ?? `${entry.backend} ${stripped}`,
         inputSchema: t.inputSchema ?? { type: "object", additionalProperties: true },
