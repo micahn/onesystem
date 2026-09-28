@@ -60,11 +60,33 @@ working, not a bug.
 
 ## Install
 
+Requires [bun](https://bun.sh) and [uv](https://docs.astral.sh/uv/). uv is only needed for
+`onesystem install`; bun runs everything else.
+
 ```sh
 bun install
 mkdir -p ~/.config/onesystem
 cp onesystem.config.json ~/.config/onesystem/onesystem.json
 ```
+
+That config is a **template, not a working file.** Every path in it is a placeholder
+(`/path/to/...`, `/home/you/...`), because the real ones depend on your interpreter and your
+weights directory and cannot be written down in a repository. The installer is what fills
+them in:
+
+```sh
+onesystem install laya    # builds the runtime, then prints the exact block for your machine
+onesystem use laya        # and switches the config to it
+```
+
+Skipping this is the most likely way to fail on a first run. A placeholder `command` path
+does not fail loudly at start: the daemon accepts the connection and answers, then returns
+an error payload on the first `tools/call`, and `onesystem status` reports the backend as
+failed to start with the placeholder in the message. Nothing is wrong except the path.
+
+`onesystem install` needs a GPU it can identify. It reads the vendor from `lspci` and the
+gfx target from `rocm-smi`, and refuses rather than guessing, so an unsupported or
+undetectable card stops the install instead of quietly producing a CPU-only runtime.
 
 Then in `~/.config/opencode/opencode.json`, register the plugin and **remove** the old
 per-session stdio entry:
@@ -101,6 +123,18 @@ onesystem start     # start the daemon if it is not already up (race-safe)
 onesystem status    # what is running; loads nothing
 onesystem stop      # stop it now
 onesystem serve     # run in the foreground
+```
+
+And the model commands, which read no config and so work even when the config is what is
+broken:
+
+```sh
+onesystem runtimes            # which runtimes are installed
+onesystem doctor [model]      # check one against the GPU it will run on
+onesystem install <model>     # build a runtime onesystem owns
+onesystem use <model>         # switch which backend is enabled
+onesystem uninstall <model>
+onesystem config-path
 ```
 
 Logs go to `~/.local/state/onesystem/daemon.log`.
@@ -243,9 +277,16 @@ hold session start open.
 ## Tests
 
 ```sh
-bun test              # 24 unit and integration tests
+bun test              # 279 unit and integration tests
 ./test/e2e-laya.sh    # end to end against the real laya backend
 ```
+
+`bun test` is self-contained: the backend tests run against fake MCP processes in
+`test/fixtures/`, so they need no GPU and no model. `e2e-laya.sh` is the opposite. It wants
+a real AMD or NVIDIA card, a `laya` runtime from `onesystem install laya`, and the laya MCP
+shim on `PATH` under the name `laya-mcp-idle-server`, which is not part of this repository.
+It also stops and starts the daemon on port 7331, so do not run it against a session you are
+using.
 
 The tests worth knowing about:
 
@@ -266,7 +307,7 @@ The tests worth knowing about:
 
 ## Measured
 
-On this machine (AMD GPU, ROCm 6.4, `laya` 0.3.10):
+On this machine (AMD GPU, ROCm 6.4, `laya` 0.3.21):
 
 | | |
 | --- | --- |
@@ -279,15 +320,34 @@ On this machine (AMD GPU, ROCm 6.4, `laya` 0.3.10):
 
 ```
 src/
-  lock.ts               single-instance guard
-  config.ts             JSONC config, validation
-  supervisor.ts         lazy start, request accounting, idle shutdown
-  http.ts               MCP Streamable HTTP front
+  cli.ts                serve | start | stop | status | install | use | doctor
   daemon.ts             lock + bind + supervise + wind down
-  cli.ts                serve | start | stop | status
+  lock.ts               single-instance guard
+  http.ts               MCP Streamable HTTP front
+  health.ts             what GET /health means, and how to read it
+  supervisor.ts         lazy start, request accounting, idle shutdown
+  config.ts             JSONC config, validation
+  config-edit.ts        editing that config without destroying the comments
+  routing.ts            which model answers when the agent has not said
+  naming.ts             what a backend and its tools are called
+  models.ts             the models onesystem knows how to install
+  install.ts            installing a model: a Python environment onesystem owns
+  paths.ts              where things live on disk
+  subprocess.ts         the project's one subprocess seam
+  async.ts              deadlines and error description, shared by everything that waits
+  log.ts                structured logging
+  version.ts
   backend/
-    types.ts            the Backend contract
+    spec.ts             what a backend is, as declared in config
+    types.ts            the Backend contract, and the port the daemon depends on
     stdio-mcp.ts        spawn + forward to a local MCP process
     systemone-http.ts   POST /v1/systemone
-  plugin/index.ts       the opencode V2 plugin
+    usage.ts            per-backend call accounting
+  plugin/
+    index.ts            the opencode V2 plugin
+    discover.ts         finding the daemon, from either entrypoint
+    tools.ts            registering the models as native tools
+    tui.ts              the status line, and a way to fix what it says
+  shims/
+    julia-mcp.py        MCP bridge for julia, which ships a library and no server
 ```
