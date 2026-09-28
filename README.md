@@ -5,8 +5,9 @@ request and stop when idle.
 
 ## Install
 
-Requires OpenCode V2, Git, curl, Bun, uv, and an AMD or NVIDIA GPU.
-See [requirements](#requirements) for GPU setup.
+Requires OpenCode V2, Git, curl, mise, and an AMD or NVIDIA GPU. The installer
+uses mise to install Bun and uv if they are missing. See
+[requirements](#requirements) for GPU setup.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
@@ -112,7 +113,8 @@ in the backend's `env` when its command needs an explicit interpreter. The insta
 
 - OpenCode V2. Check `opencode --version`. If mise still selects V1, put the V2
   binary first on `PATH`. This plugin uses the V2 API.
-- Git, curl, Bun, and uv. With mise: `mise use -g bun uv`.
+- Git, curl, and mise. Bun and uv are installed with `mise use -g bun uv` when
+  they are missing, so the installer stops if mise is not on `PATH`.
 - `lspci` from `pciutils` to detect the GPU vendor.
 - For AMD, ROCm and `rocm-smi` on `PATH`. NVIDIA uses the CUDA install path and
   does not need ROCm.

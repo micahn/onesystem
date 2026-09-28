@@ -99,13 +99,26 @@ missing=()
 command -v git >/dev/null 2>&1 || missing+=("git")
 command -v curl >/dev/null 2>&1 || missing+=("curl")
 
-if command -v bun >/dev/null 2>&1; then
-  ok "bun $(bun --version)"
-else
-  missing+=("bun")
+# Install bun and uv through mise, which is guaranteed here. It needs no sudo, and
+# it is the tool this project already tells people to use.
+absent=()
+for tool in bun uv; do
+  command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
+done
+if (( ${#absent[@]} )); then
+  if command -v mise >/dev/null 2>&1; then
+    step "mise install ${absent[*]}"
+    mise use -g "${absent[@]}" >/dev/null 2>&1 || warn "mise could not install ${absent[*]}"
+    # Shims only reach a new shell after mise activates; the installer cannot
+    # modify its own PATH back in, so add them here.
+    shims="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims"
+    [[ -d "$shims" ]] && PATH="$shims:$PATH"
+  else
+    die "mise is required to install ${absent[*]}, and it is not on PATH"
+  fi
 fi
 
-# Check runtime build tools before downloading.
+command -v bun >/dev/null 2>&1 && ok "bun $(bun --version)" || missing+=("bun")
 command -v uv >/dev/null 2>&1 && ok "uv $(uv --version 2>/dev/null | head -1)" || missing+=("uv")
 
 # Detect the vendor with lspci. AMD also needs rocm-smi for its gfx target.
