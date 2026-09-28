@@ -8,14 +8,14 @@ import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { loadConfig, type Config } from "./config.ts"
+import { loadConfig, probeConfig, type Config } from "./config.ts"
 import { configDir, configPath, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
 import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
-import { pluginAutoloadFiles, switchToBackend, writeBackend } from "./config-edit.ts"
+import { pluginAutoloadFiles, repairConfig, switchToBackend, writeBackend } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
 import {
   backendFor,
@@ -106,8 +106,11 @@ async function cmdStart(config: Config): Promise<number> {
   return 1
 }
 
-async function cmdStop(config: Config): Promise<number> {
-  const url = daemonUrl(config.host, config.port)
+async function cmdStop(): Promise<number> {
+  // Read leniently. A config problem in a backend we cannot reach must not make the one
+  // command that can stop the daemon into the one command that cannot run.
+  const found = await probeConfig()
+  const url = daemonUrl(found.address.host, found.address.port)
   const health = await probe(url)
   if (!health) {
     log.info("no daemon reachable", { url })
@@ -255,14 +258,53 @@ async function cmdUninstall(args: string[]): Promise<number> {
  * Check the installed interpreter, PyTorch build, and GPU visibility.
  */
 async function cmdDoctor(args: string[]): Promise<number> {
+  const fix = args.includes("--fix")
+  const names = args.filter((a) => !a.startsWith("-"))
+  let bad = 0
+
+  // The config first: a broken one stops every other command, so it is the thing most
+  // worth saying, and `doctor` is the only command that can still read it.
+  const probe = await probeConfig()
+  if (probe.problems.length === 0) {
+    process.stdout.write(`config: ok (${probe.path})\n`)
+  } else {
+    bad++
+    process.stdout.write(`config: ${probe.problems.length} problem(s) in ${probe.path}\n`)
+    for (const p of probe.problems) {
+      process.stdout.write(`  - ${p.message}\n`)
+      process.stdout.write(p.fix ? `      fixable: ${p.fix.key} = ${p.fix.value}\n` : `      not fixable automatically\n`)
+    }
+    if (fix) {
+      try {
+        const repair = await repairConfig(probe.path, probe.problems)
+        if (!repair.changed) {
+          process.stdout.write("  nothing to fix, or the file is already what doctor would write\n")
+        } else {
+          process.stdout.write(`  fixed: ${repair.applied.join(", ")}\n`)
+        }
+      } catch (err) {
+        process.stdout.write(`  could not write ${probe.path}: ${describeError(err)}\n`)
+        return 1
+      }
+      const after = await probeConfig()
+      if (after.problems.length > 0) {
+        process.stdout.write(`  still ${after.problems.length} problem(s):\n`)
+        for (const p of after.problems) process.stdout.write(`  - ${p.message}\n`)
+        return 1
+      }
+      process.stdout.write(`config: ok (${after.path})\n`)
+    } else if (probe.problems.some((p) => p.fix)) {
+      process.stdout.write("  re-run with --fix to apply the corrections above\n")
+    }
+  }
+
   const gpu = await detectGpu(run)
   process.stdout.write(`gpu: ${gpu.vendor}${gpu.gfx ? ` (${gpu.gfx})` : ""}\n`)
-  const targets = args.length > 0 ? [args[0]!] : (await listRuntimes()).map((r) => r.name)
+  const targets = names.length > 0 ? names : (await listRuntimes()).map((r) => r.name)
   if (targets.length === 0) {
     process.stdout.write("no runtimes to check\n")
-    return 0
+    return bad === 0 ? 0 : 1
   }
-  let bad = 0
   for (const name of targets) {
     const check = await verify(runtimeDir(name), gpu, run)
     if (check.ok) {
@@ -338,13 +380,16 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   // Before config loading, so it still works with no config file present at all.
   if (command === "config-path") return cmdConfigPath()
 
-  // Installation and diagnostics must work before a valid config exists.
+  // Installation, diagnostics and shutdown must work before a valid config exists.
+  // `stop` reads leniently on purpose: whatever is wrong, it has to be able to kill the
+  // daemon, and the alternative is being locked out of the one command that fixes it.
   if (
     command === "install" ||
     command === "uninstall" ||
     command === "runtimes" ||
     command === "register-plugin" ||
-    command === "doctor"
+    command === "doctor" ||
+    command === "stop"
   ) {
     switch (command) {
       case "install":
@@ -355,6 +400,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         return cmdRuntimes()
       case "register-plugin":
         return cmdRegisterPlugin()
+      case "stop":
+        return cmdStop()
       default:
         return cmdDoctor(argv.slice(1))
     }
@@ -377,8 +424,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0
     case "start":
       return cmdStart(config)
-    case "stop":
-      return cmdStop(config)
     case "status":
       return cmdStatus(config, path)
     default:

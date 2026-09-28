@@ -8,7 +8,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, printParseErrorCode, type ParseError } from "jsonc-parser"
-import type { Config } from "./config.ts"
+import type { Config, ConfigProblem } from "./config.ts"
 
 /**
  * Set backends.<name>.enabled and return the edited text.
@@ -71,6 +71,29 @@ export async function setSetting(
     applyEdits(text, modify(text, [key], value, { formattingOptions: { insertSpaces: true, tabSize: 2 } })),
   )
   return { changed: result.changed }
+}
+
+/**
+ * Apply the corrections a probe offered, and report what changed.
+ *
+ * Only problems that carry a fix are touched. A config that is merely wrong in a way
+ * nobody can decide for the user is left exactly as it is, so `--fix` is safe to run
+ * on a file you care about: it never guesses.
+ */
+export async function repairConfig(
+  path: string,
+  problems: ConfigProblem[],
+): Promise<{ changed: boolean; applied: string[] }> {
+  const fixes = problems.flatMap((p) => (p.fix ? [{ key: p.fix.key, value: p.fix.value }] : []))
+  if (fixes.length === 0) return { changed: false, applied: [] }
+
+  const result = await editConfig(path, (text) =>
+    fixes.reduce((acc, f) => applyEdits(acc, modify(acc, [f.key], f.value, { formattingOptions: { insertSpaces: true, tabSize: 2 } })), text),
+  )
+  return {
+    changed: result.changed,
+    applied: result.changed ? fixes.map((f) => `${f.key} = ${f.value}`) : [],
+  }
 }
 
 /**

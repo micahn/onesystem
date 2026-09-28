@@ -55,7 +55,7 @@ package's CLI to `PATH`, you can use `onesystem <command>` instead.
 | `stop` | Stop the daemon and its local backends. |
 | `serve` | Run the daemon in the foreground. |
 | `runtimes` | List installed runtimes. |
-| `doctor [model]` | Check an installed runtime against the GPU. |
+| `doctor [model] [--fix]` | Check the config and the runtimes. `--fix` repairs what it can. |
 | `install <model>` | Install laya or julia and enable it. |
 | `use <model>` | Enable one configured backend and disable the others. |
 | `uninstall <model>` | Remove its runtime. Keep downloaded weights. |
@@ -66,6 +66,24 @@ Installing or selecting a model disables the other backends. After a config chan
 stop the daemon and restart OpenCode to reload the config and tool names.
 
 Logs: `~/.local/state/onesystem/daemon.log`.
+
+### A config that will not load
+
+Every command refuses a config it cannot validate, rather than running with settings
+nobody checked. That leaves `doctor` as the way in: it reads the file without validating
+it, so it works precisely when the other commands do not.
+
+```sh
+onesystem doctor          # every problem, and whether it can be repaired
+onesystem doctor --fix    # apply the repairs, then re-check
+```
+
+`--fix` only writes corrections that are mechanically safe, and says what it changed. A
+problem nobody can decide for you is reported and left alone, so it is safe to run on a
+file you care about.
+
+`stop` also reads leniently. A config problem in a backend you cannot reach must not stop
+you killing the daemon.
 
 ### From inside OpenCode
 

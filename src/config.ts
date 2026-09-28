@@ -169,12 +169,15 @@ export function validate(raw: unknown, source: string): Config {
   for (const [name, backend] of Object.entries(backends)) {
     const startup = backend.startupTimeoutSecs ?? 0
     if (startup > requestTimeoutSecs) {
-      throw new Error(
+      // Raise the ceiling rather than lower a backend's budget: a budget cut can turn a
+      // slow cold load into a failure, while a raised ceiling only delays a timeout.
+      throw new ConfigError(
         `${source}: backends.${name}.startupTimeoutSecs (${startup}) exceeds ` +
           `requestTimeoutSecs (${requestTimeoutSecs}). A cold call spawns the backend and ` +
           `loads its weights inside one request, so the request ceiling is what actually ` +
           `bounds the cold start. Raise requestTimeoutSecs to at least ${startup}, or lower ` +
           `this backend's startupTimeoutSecs.`,
+        { key: "requestTimeoutSecs", value: startup },
       )
     }
   }
@@ -238,15 +241,102 @@ function readRouting(raw: unknown): RoutingConfig | undefined {
   return out.enabled || out.default || out.tasks ? out : undefined
 }
 
-export async function loadConfig(path?: string): Promise<{ config: Config; path: string }> {
+/**
+ * A correction that is mechanically safe to apply. Absent where correctness is a
+ * judgement call, in which case `doctor` reports it and leaves the file alone.
+ */
+export interface ConfigFix {
+  key: "requestTimeoutSecs"
+  value: number
+}
+
+export interface ConfigProblem {
+  message: string
+  fix?: ConfigFix
+}
+
+/** A refusal from `validate`, carrying its own repair so nobody has to re-read the wording. */
+export class ConfigError extends Error {
+  constructor(message: string, readonly fix?: ConfigFix) {
+    super(message)
+    this.name = "ConfigError"
+  }
+}
+
+export interface ConfigProbe {
+  path: string
+  /**
+   * Host and port as a command would use them, valid or not. `stop` needs these and
+   * nothing else, so a backend nobody can reach must not stop it working.
+   */
+  address: { host: string; port: number }
+  /** What a strict load would refuse on. Empty when the config is valid. */
+  problems: ConfigProblem[]
+  /** Present only when `problems` is empty. */
+  config?: Config
+}
+
+/**
+ * Read and check a config without refusing to return it.
+ *
+ * Reading and checking are separate here because otherwise the command you need when a
+ * config is wrong is the one that cannot run: `loadConfig` throws, so `status` and
+ * `start` report nothing, and there is no way to ask what is wrong except reading the
+ * file by hand. `doctor` and `stop` go through here.
+ */
+export async function probeConfig(path?: string): Promise<ConfigProbe> {
   const file = path ?? configPath()
   let text: string
   try {
     text = await readFile(file, "utf8")
   } catch {
-    throw new Error(`no config at ${file}. Run 'onesystem install' to write one.`)
+    return {
+      path: file,
+      address: { host: DEFAULTS.host, port: DEFAULTS.port },
+      problems: [{ message: `no config at ${file}` }],
+    }
   }
-  return { config: validate(parseConfig(text, file), file), path: file }
+
+  let raw: unknown
+  try {
+    raw = parseConfig(text, file)
+  } catch (err) {
+    return { path: file, address: { host: DEFAULTS.host, port: DEFAULTS.port }, problems: [{ message: (err as Error).message }] }
+  }
+
+  const address = addressOf(raw, DEFAULTS)
+  try {
+    return { path: file, address, problems: [], config: validate(raw, file) }
+  } catch (err) {
+    return {
+      path: file,
+      address,
+      problems: [{ message: (err as Error).message, fix: err instanceof ConfigError ? err.fix : undefined }],
+    }
+  }
+}
+
+/** Host and port from an unvalidated document, falling back rather than trusting it. */
+function addressOf(raw: unknown, defaults: Config): { host: string; port: number } {
+  if (typeof raw !== "object" || raw === null) return { host: defaults.host, port: defaults.port }
+  const doc = raw as Record<string, unknown>
+  const host = typeof doc.host === "string" && isLoopbackHost(doc.host) ? doc.host : defaults.host
+  const port =
+    typeof doc.port === "number" && Number.isInteger(doc.port) && doc.port >= 0 && doc.port <= 65535
+      ? doc.port
+      : defaults.port
+  return { host, port }
+}
+
+export async function loadConfig(path?: string): Promise<{ config: Config; path: string }> {
+  const probe = await probeConfig(path)
+  if (probe.config) return { config: probe.config, path: probe.path }
+  const first = probe.problems[0]!
+  throw new Error(
+    first.message.startsWith("no config at")
+      ? `${first.message}. Run 'onesystem install' to write one.`
+      : `${first.message}\n  Run 'onesystem doctor' to see it, and 'onesystem doctor --fix' to repair it.`,
+  )
 }
 
 /**
