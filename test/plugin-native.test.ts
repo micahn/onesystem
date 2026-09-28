@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import plugin, { belongsToServer } from "../src/plugin/index.ts"
+import plugin from "../src/plugin/index.ts"
 import { startStubDaemon, STUB_TOOLS, type StubDaemon } from "./fixtures/stub-daemon.ts"
 
 const cleanups: (() => Promise<void>)[] = []
@@ -26,7 +26,7 @@ interface Harness {
   toolNames: string[]
   stub: StubDaemon
   marker: string
-  before(tool: string): Promise<void>
+  before(tool: string | { tool?: unknown }): Promise<void>
   reloads: number
   disposed: number
 }
@@ -82,9 +82,12 @@ async function harness(backends?: Record<string, unknown>): Promise<Harness> {
     get disposed() {
       return state.disposed
     },
-    before: async (tool: string) => {
+    before: async (tool: string | { tool?: unknown }) => {
       if (!hook) throw new Error("no execute.before hook registered")
-      await hook({ tool })
+      // Accepts a raw payload as well as a bare name, because what the hook has to
+      // survive is the whole `input` the host builds, not the well-formed subset of it
+      // these tests would otherwise send.
+      await hook(typeof tool === "string" ? { tool } : (tool as { tool: string }))
     },
   }
 }
@@ -244,12 +247,73 @@ describe("where the plugin gets the address", () => {
   })
 })
 
-describe("belongsToServer still matches native tool names", () => {
-  test("the recovery hook can find our tools among opencode's built-ins", () => {
-    expect(belongsToServer("predict", ["predict", "status"])).toBe(true)
-    expect(belongsToServer("status", ["predict", "status"])).toBe(true)
-    expect(belongsToServer("bash", ["predict", "status"])).toBe(false)
-    // opencode may namespace a plugin tool; the normalisation has to survive that.
-    expect(belongsToServer("onesystem_predict", ["predict"])).toBe(false)
+describe("the recovery hook finds our tools however the host spells them", () => {
+  test("a namespaced tool id is still recognised as ours", async () => {
+    const h = await harness()
+    h.stub.healthy = false
+    // `planTools` registers the bare name `predict`, so the hook normally sees it verbatim
+    // and this is an equality test. But opencode may namespace a plugin-registered tool the
+    // way it namespaces an MCP one, and the joiner has moved between `_`, `.` and `-`
+    // across versions. The name we registered is the thing that survives into a namespaced
+    // id as its tail, so the guard matches on that.
+    //
+    // This asserted the *opposite* for the whole life of the function — `.toBe(false)` —
+    // on a line whose neighbour said "the normalisation has to survive that". A false
+    // negative is the silent kind: nothing throws, the "Coming back" section just goes
+    // inert, and a session that outlives the idle window gets "Unable to connect" against
+    // a port nothing is listening on, with the daemon waiting for a human. That is the
+    // exact symptom the section exists to prevent, so this was not a wrong test but a
+    // description of the bug — and the guard was rewritten to match the comment.
+    await h.before("onesystem_predict")
+    expect(await readFile(h.marker, "utf8")).toBe("start\n")
+  })
+
+  test("the joiner can be any of the three spellings opencode has used", async () => {
+    for (const id of ["onesystem_predict", "onesystem.predict", "onesystem-predict"]) {
+      const h = await harness()
+      h.stub.healthy = false
+      await h.before(id)
+      expect(await readFile(h.marker, "utf8")).toBe("start\n")
+    }
+  })
+
+  test("a name we did not register is not ours, however it is spelled", async () => {
+    const h = await harness()
+    h.stub.healthy = false
+    // The other direction has to hold too, or the guard starts restarting the daemon on
+    // other people's tools. Suffix matching widens what matches, so this is the half that
+    // needs pinning.
+    for (const id of ["bash", "read", "onesystem_bash", "prediction"]) {
+      await h.before(id)
+    }
+    expect(await readFile(h.marker, "utf8")).toBe("")
+  })
+
+  test("the qualified names a two-backend setup registers are ours too", async () => {
+    const h = await harness({ laya: STUB_TOOLS.laya, julia: STUB_TOOLS.julia })
+    h.stub.healthy = false
+    // `planTools` qualifies the name when more than one backend is usable, so this session
+    // was handed `laya_predict` and `julia_predict`. Those match as bare tails as well as
+    // as exact names, which is the property that lets the guard be written against the
+    // name it registered instead of a server prefix it does not control.
+    expect(h.toolNames).toEqual(["laya_predict", "laya_status", "julia_predict"])
+    await h.before("laya_predict")
+    expect(await readFile(h.marker, "utf8")).toBe("start\n")
+  })
+
+  test("nothing the host puts in the payload can fail the call it wraps", async () => {
+    const h = await harness()
+    h.stub.healthy = false
+    // `tool.execute.before` runs for every call in the session and a throw from it breaks
+    // the session's whole tool surface, not just that one call. `input.tool` is the only
+    // value here the host owns, so the property worth pinning is that the hook returns
+    // normally whatever it is handed — including a value that throws merely to be read,
+    // which is what reaches the catch below `isOurTool`.
+    for (const tool of [undefined, 42, null, {}, [], () => {}, { toString: () => { throw new Error("host sent junk") } }]) {
+      await h.before({ tool })
+    }
+    // Still does its job on the way through.
+    await h.before("predict")
+    expect(await readFile(h.marker, "utf8")).toBe("start\n")
   })
 })

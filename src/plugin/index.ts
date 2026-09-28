@@ -85,19 +85,45 @@ export interface OnesystemOptions {
 }
 
 /**
- * True when a tool id belongs to one of the servers this plugin registered.
+ * True when a tool id is one of ours.
  *
- * The effective id opencode hands a hook is the server name joined to the tool name, and
- * the joiner has moved between `_` and `.` across versions while server names still carry
- * `-` (`onesystem-laya`). Normalising all three to `_` and comparing the prefix is stable
- * across those spellings, and a false positive is harmless anyway: the recovery path is a
- * health probe against a loopback port.
+ * The part we control is the tool name, not the namespace. `planTools` hands opencode bare
+ * names — `predict`, `status` — so a hook normally sees the name verbatim and this is an
+ * equality test. But opencode may namespace a plugin-registered tool the way it namespaces
+ * an MCP one, and the joiner has moved between `_`, `.` and `-` across versions. The name
+ * we registered is the thing that survives into a namespaced id as its tail, so match on
+ * that: an id is ours if it *ends* with one of our names behind a separator.
+ *
+ * Which is the opposite of the rule this replaced, and the direction matters more than the
+ * arithmetic. Matching a *prefix* meant that a namespaced id failed to match, and that
+ * failure is silent: the recovery hook stops matching, nothing errors, and a session that
+ * outlives the idle window gets "Unable to connect" against a port nothing is listening on
+ * — the exact symptom the hook exists to prevent, with a daemon waiting for a human. The
+ * old code's doc offered "a false positive is harmless anyway: the recovery path is a
+ * health probe" as its mitigation, which covers false positives only. A false negative is
+ * the failure this function exists to prevent.
+ *
+ * Suffix matching does not eliminate the false positive, and it is worth being precise
+ * about what it is: with `predict` and `status` registered, `laya_status` has to match —
+ * it is a name a two-backend session really gets from `planTools` — and that same rule
+ * also accepts `predict_status`, which is not a name we ever register. The two are the
+ * same string shape, so no amount of care in here separates them, and pretending otherwise
+ * would be the same mistake the old doc made in the other direction. What it costs is one
+ * extra `/health` probe, and on a dead daemon one spurious `onesystem start` for a tool
+ * that was not ours. Cheap, bounded, and the opposite of a session-wide outage.
  */
-export function belongsToServer(tool: string, serverNames: readonly string[]): boolean {
-  const id = tool.replace(/[-.]/g, "_").toLowerCase()
-  return serverNames.some((name) => {
-    const server = name.replace(/-/g, "_").toLowerCase()
-    return id === server || id.startsWith(server + "_")
+function isOurTool(id: unknown, ourNames: readonly string[]): boolean {
+  // `unknown`, not `string`, and narrowed here rather than trusted. `input.tool` is the
+  // one value in this hook the host owns, and it arrives from a `tool.execute.before`
+  // payload that is not ours to describe. A non-string here used to be a `TypeError` out
+  // of a global hook; now it is a tool that is not ours, which is the only question this
+  // function is being asked.
+  if (typeof id !== "string") return false
+  const norm = (s: string) => s.replace(/[-.]/g, "_").toLowerCase()
+  const tool = norm(id)
+  return ourNames.some((name) => {
+    const ours = norm(name)
+    return tool === ours || tool.endsWith("_" + ours)
   })
 }
 
@@ -213,8 +239,33 @@ export default Plugin.define({
     const recovery = options.noStart
       ? null
       : await ctx.tool.hook("execute.before", async (input) => {
-          if (!belongsToServer(input.tool, serverNames)) return
-          await ensureUp()
+          // Total by construction, and that is the whole point of the try.
+          //
+          // `tool.execute.before` runs for *every* tool call in the session, ours or not,
+          // and a throw from it does not fail that one call — it breaks the tool surface
+          // for the entire session, which is a far worse failure than the one this hook
+          // exists to prevent. That is not hypothetical: this exact hook shipped a
+          // ReferenceError once. `belongsToServer` was renamed to `isOurTool` and the call
+          // site was left naming the old binding, so the hook threw
+          // `belongsToServer is not defined` on every call, and an agent with this plugin
+          // loaded could not read, edit, or run a shell command — the failure took out the
+          // harness doing the work, not just our tools.
+          //
+          // `healthy()` and `run()` are both documented never-throw, so nothing in the
+          // body is *expected* to raise. This catches a bug in the body instead, and a
+          // thrown hook body is indistinguishable from a dead session to whoever is
+          // driving one. Degrading to "the call proceeds" costs one connection error, and
+          // that error is the real diagnosis: the daemon saying nothing is listening is a
+          // far better thing to hand back than a plugin erroring in a recoverer.
+          try {
+            if (!isOurTool(input.tool, serverNames)) return
+            await ensureUp()
+          } catch (err) {
+            log("recovery hook failed; letting the call through to report its own error", {
+              tool: String(input?.tool),
+              error: String(err),
+            })
+          }
         })
 
     log("registered tools", { tools: serverNames, base, recovery: !options.noStart })
