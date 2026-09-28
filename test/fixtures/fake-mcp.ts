@@ -1,14 +1,6 @@
 /**
- * A real MCP server over stdio, used by the lazy-start test.
- *
- * Deliberately built on the SDK rather than mocked, because the property under test is
- * about process and protocol behaviour: that spawning this does no work until a
- * request arrives. A mock would not have a stdout handshake to wait on, and the whole
- * failure mode being guarded against is a real one.
- *
- * Writes a line to $FAKE_MCP_MARKER on startup, before it binds stdio, which is what
- * the test watches for. That ordering mirrors the real laya shim, and is the reason a
- * cold connect is silent for as long as it is.
+ * Real SDK-based stdio server for lazy-start and protocol tests.
+ * Write FAKE_MCP_MARKER before binding stdio so tests can detect process startup.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"

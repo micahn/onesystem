@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One shared System 1 decision service on the GPU, fronted over HTTP, consumed by opencode sessions.",
+  "description": "A shared GPU decision service for OpenCode sessions.",
   "license": "MIT",
   "bin": {
     "onesystem": "./src/cli.ts"

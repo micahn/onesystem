@@ -1,13 +1,6 @@
 /**
- * A stub daemon: `/health`, `/catalog` and `/call`, and nothing else.
- *
- * The plugin now registers its tools by reading the daemon's catalog over HTTP, so a test
- * that exercises registration has to have something to read. This is that something, and it
- * is a real HTTP server rather than a stubbed `fetch` because the base URL is the whole
- * point — the plugin is told where the daemon is and has to go and look.
- *
- * It also records calls, so a test can assert what the plugin asked for rather than only
- * what it registered.
+ * Serve /health, /catalog, and /call over real HTTP to test address discovery and
+ * tool registration. Record call bodies so tests can check forwarding too.
  */
 
 import { createServer, type Server } from "node:http"

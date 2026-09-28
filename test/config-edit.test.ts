@@ -1,10 +1,5 @@
 /**
- * Editing the config without losing it.
- *
- * The config is JSONC and every number in it has a comment explaining why it is that
- * number. Those comments are the reason the file is hand-editable, so a command that
- * rewrites it through `JSON.stringify` is a command that deletes the file's value. These
- * tests pin the round trip.
+ * Config edits must preserve JSONC comments and unrelated settings.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

@@ -1,22 +1,7 @@
 /**
- * The installer's ordering, driven by a scripted runner.
- *
- * `install()` is 55 lines of pure sequence: remove staging, fetch, write a manifest, lock,
- * check the lock, sync, verify, remove the old directory, write `meta.json`, rename. Not
- * one line of it was reachable from a test, because every step went through a private
- * `run()` that spawned for real. The subject of this module is the *order* — that is where
- * the crash-safety argument lives — and the order was the one thing nothing could check.
- *
- * The runner is now the project's subprocess seam (`src/subprocess.ts`) and is threaded
- * through, so a script can stand in for the machine. Note what the script also has to
- * answer: `detectGpu` is four subprocesses, so detection is exercised here too rather than
- * stubbed out, and a scripted `lspci` is the fake GPU.
- *
- * What the script must genuinely do, because the code depends on it: `uv lock` has to
- * write a `uv.lock` into its cwd, since `install` reads it straight back to check the
- * accelerator, and `uv sync` has to produce a `.venv/bin/python`, since `verify` refuses to
- * report anything without an interpreter there. A fake that returned `{code: 0}` and
- * nothing else would pass a test that proves nothing.
+ * Check install ordering and failure cleanup with a scripted command runner.
+ * Supply GPU detection responses, write uv.lock, and create .venv/bin/python:
+ * returning exit code 0 alone cannot exercise the installer's filesystem checks.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"

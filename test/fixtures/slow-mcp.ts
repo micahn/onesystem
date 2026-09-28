@@ -1,20 +1,7 @@
 /**
- * An MCP server that takes its time before binding stdio.
- *
- * This models the real thing, which is why it exists. `laya's server imports
- * transformers and does that *before* it binds stdio, so a cold connect is silent for
- * 25-30s. Any shutdown that lands inside that window used to be lost: the adapter's
- * `stop()` read the client field, which is only assigned once `connect()` resolves, so it
- * closed nothing, returned, and let the daemon release its lock. The handshake then
- * completed, set the state to `warm`, and left a live process holding VRAM that a
- * successor daemon had no way to see.
- *
- * `$FAKE_MCP_HANDSHAKE_MS` is how long to stall before binding. The test quiesces during
- * the stall and asserts nothing is left warm afterwards.
- *
- * `$FAKE_MCP_LINGER_MS` keeps the process alive after the parent goes away, so a test can
- * see whether the child was actually reaped. Without it the process would exit on stdin
- * closing regardless, and the test could not tell a real teardown from an incidental exit.
+ * Delay binding by FAKE_MCP_HANDSHAKE_MS to test shutdown during startup.
+ * FAKE_MCP_LINGER_MS keeps the child alive after stdin closes, so tests can prove
+ * that cleanup killed it rather than relying on an incidental exit.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"

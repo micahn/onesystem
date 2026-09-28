@@ -1,27 +1,7 @@
 /**
- * `onesystem` CLI.
- *
- *   serve    run the daemon in the foreground (what `start` re-execs into)
- *   start    start a detached daemon, or report that one is already up
- *   stop     ask a running daemon to exit
- *   status   report what is running, loading nothing
- *
- * `start` is the interesting one. It must be safe to call from many opencode sessions
- * at once, which is the same race the plugin has. It resolves it in three steps rather
- * than one: probe health, and if nothing answers, spawn a detached `serve` and wait
- * for /health to answer. The spawned daemon takes the lock, so if several sessions race
- * here, every one of them ends up waiting on the same winner. Waiting on health rather
- * than on the child's exit is what makes this correct: the loser's `serve` exits with
- * code 3 and the loser treats that as success, because someone is serving.
- *
- * ## `status` is the daemon's machine interface
- *
- * The opencode plugin does not import any of this. It runs `status` and reads the JSON,
- * which makes this payload the seam between the two. That is why `DaemonStatus` lives in
- * `config.ts` next to the naming rules and the address it reports: the plugin used to
- * re-derive both, in an anonymous type, from a hardcoded port and an environment variable
- * no daemon code reads. Now there is one answer to "what should I register, and where",
- * produced by the same code that decides the answer.
+ * Daemon and model commands. Concurrent `start` calls wait for the same healthy
+ * daemon; a child that loses the lock exits with LOCK_BUSY_EXIT.
+ * `status` emits the DaemonStatus contract from health.ts for plugin discovery.
  */
 
 import { spawn } from "node:child_process"
@@ -84,12 +64,8 @@ async function cmdStart(config: Config): Promise<number> {
     return 0
   }
 
-  // The daemon's stderr goes to a log file, not to our stderr.
-  //
-  // Inheriting it looks harmless and is not: the daemon outlives this process, so it
-  // keeps the inherited descriptor open, and anything capturing our output --
-  // `$(onesystem start)`, a pipe into `tail`, a CI log -- blocks until the daemon
-  // exits, which may be hours. A detached process's diagnostics belong in a file.
+  // Log detached stderr to a file. An inherited pipe would stay open until the
+  // daemon exits, blocking command substitutions and captured output.
   const logPath = join(stateDir(), "daemon.log")
   await mkdir(stateDir(), { recursive: true })
   const logFd = openSync(logPath, "a")
@@ -103,8 +79,7 @@ async function cmdStart(config: Config): Promise<number> {
   closeSync(logFd)
   log.info("spawned daemon", { pid: child.pid, url, log: logPath })
 
-  // Wait for health. The cold daemon binds its port before any model loads, so this
-  // returns in well under a second and is not the 20-54s model cost.
+  // Health is available before any model loads.
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
     await Bun.sleep(100)
@@ -166,15 +141,12 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
     config: configPath,
     configCandidates: configCandidates(),
     configDir: configDir(),
-    // The address the daemon will actually answer on, from the config it actually
-    // loaded. The plugin registers against this instead of rebuilding a URL from a
-    // default port it has to keep in step with this file.
+    // Plugins use this configured URL instead of deriving their own.
     url,
     running: health !== null,
     daemon: health,
     lock: holder,
-    // The names the plugin will actually register, not a restatement of the config, so
-    // `status` and the live tool surface cannot drift apart.
+    // Share the naming rules with the plugin.
     registrations: registrations(config.backends),
     idleShutdownSecs: config.idleShutdownSecs,
     ...(config.routing ? { routing: config.routing } : {}),
@@ -184,10 +156,7 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
 }
 
 async function cmdConfigPath(): Promise<number> {
-  // The truth about which file is in use, and where the others would be. This used to
-  // print one path from a helper whose own comment claimed it was "the config file that
-  // would be used" — which is wrong for exactly the people who run it, since with no
-  // user config the daemon falls back to the bundled example.
+  // Include the bundled template in the search, as loadConfig does.
   const candidates = configCandidates()
   const inUse = candidates.find((p) => existsSync(p))
   if (inUse) {
@@ -199,12 +168,7 @@ async function cmdConfigPath(): Promise<number> {
 }
 
 /**
- * Install a model into a Python environment onesystem owns.
- *
- * Not wired into the plugin's own setup. Installing 6 GB of torch is not something a
- * session should trigger as a side effect of opening a terminal, and a failed install
- * that leaves a half-configured backend is worse than no backend. The plugin will *use*
- * an installed model; a person installs one.
+ * Install and configure a model on request. Plugin setup must not trigger downloads.
  */
 async function cmdInstall(args: string[]): Promise<number> {
   const [name, ...rest] = args
@@ -225,25 +189,16 @@ async function cmdInstall(args: string[]): Promise<number> {
     process.stdout.write(`installed ${name}\n  interpreter: ${runtime.python}\n`)
 
     const backend = await backendFor(spec, runtime)
-    // Not gated on `interpreterEnv`. That was the condition, and only laya has one, so
-    // `onesystem install julia` said nothing about how to use what it had just built --
-    // which is the only question someone has at that point.
     if (rest.includes("--no-config")) {
       process.stdout.write(`\nnot written to any config (--no-config). The block is:\n${configHint(spec, runtime, backend)}\n`)
     } else {
-      // Installed *and* configured. The copy was the last manual step in the flow, and it
-      // was the one that could fail invisibly: a block missing a key still parses, the
-      // daemon still starts, and the mistake surfaces as an error payload on the first
-      // tool call rather than as a config error.
+      // Write the resolved backend so the user does not need to copy a config block.
       try {
         const { config, path } = await loadConfig()
         await writeBackend(path, name, backend, { enabled: true })
         const switched = await switchToBackend(path, config, name)
         process.stdout.write(`\nconfigured ${path}\n  enabled: ${name}\n`)
-        // Enabling a model makes it the only enabled one, so say which backend that took
-        // off. This used to be silent, and the effect is that installing a second model
-        // quietly stops the first one answering -- a change nobody sees until a tool goes
-        // missing from the session.
+        // Report other backends disabled by the switch.
         for (const other of switched.off) {
           if (other !== name) {
             process.stdout.write(`  turned off: ${other} (onesystem use ${other} to switch back)\n`)
@@ -251,23 +206,20 @@ async function cmdInstall(args: string[]): Promise<number> {
         }
         if (needsManualCommand(backend)) {
           process.stdout.write(
-            `\nONE THING LEFT: the \`command\` above is a placeholder, because ${name} ships a\n` +
-              `server this installer cannot locate. Point it at the real binary in ${path}.\n`,
+            `\nSet \`command\` in ${path} to the ${name} MCP server binary.\n`,
           )
         } else {
-          process.stdout.write(`\nRun \`onesystem start\` and make a tool call. Nothing else to do.\n`)
+          process.stdout.write(`\nRun \`onesystem start\`, then make a tool call.\n`)
         }
       } catch (err) {
-        // The runtime is on disk and usable; only the config write failed. Saying so is
-        // the difference between "it half worked" and "it did nothing".
+        // The runtime remains usable if the config write fails.
         process.stdout.write(`\ninstalled, but the config was not updated: ${describeError(err)}\n`)
         process.stdout.write(`\nIt is on disk and usable. Add this yourself:\n${configHint(spec, runtime, backend)}\n`)
       }
     }
     if (spec.interpreterEnv) {
       process.stdout.write(
-        `\n${spec.interpreterEnv} goes in the config, not your shell: the daemon inherits nothing\n` +
-          `from the session that started it.\n`,
+        `\nSet ${spec.interpreterEnv} in backend env so all sessions use the same runtime.\n`,
       )
     }
     return check.ok ? 0 : 1
@@ -302,12 +254,7 @@ async function cmdUninstall(args: string[]): Promise<number> {
 }
 
 /**
- * Check an installed runtime against the GPU it would run on.
- *
- * The command that turns a silent failure loud. Every way this goes wrong — CUDA torch
- * on AMD, a venv built for the wrong interpreter, an arch torch was not built for —
- * produces a runtime that imports cleanly and then runs on the CPU, or does not, and
- * neither is obvious until you time a call.
+ * Check the installed interpreter, PyTorch build, and GPU visibility.
  */
 async function cmdDoctor(args: string[]): Promise<number> {
   const gpu = await detectGpu(run)
@@ -332,12 +279,7 @@ async function cmdDoctor(args: string[]): Promise<number> {
 }
 
 /**
- * Switch which model is live.
- *
- * A flag, not a mechanism. The daemon supervises each backend independently and the tool
- * surface namespaces itself per backend, so switching means turning one off and the other
- * on — and `enabled` already exists. What this adds is that the edit preserves the file's
- * comments and refuses to write over a concurrent change.
+ * Enable one configured model while preserving comments and detecting concurrent edits.
  */
 async function cmdUse(args: string[]): Promise<number> {
   const [name] = args
@@ -347,9 +289,6 @@ async function cmdUse(args: string[]): Promise<number> {
   }
   const { config, path } = await loadConfig()
 
-  // The switch itself is `config-edit.switchToBackend`, not code in this function. It used
-  // to be here, in the one command that needed it, which left the TUI's install menu with
-  // no way to do the second half of what it promised.
   let switched: Awaited<ReturnType<typeof switchToBackend>>
   try {
     switched = await switchToBackend(path, config, name)
@@ -369,23 +308,14 @@ async function cmdUse(args: string[]): Promise<number> {
 }
 
 /**
- * Register this plugin with opencode, by dropping a file where it autodiscovers one.
- *
- * opencode V2 loads every `.ts` and `.js` file in `~/.config/opencode/plugins/`, so
- * registering means writing one line there. It also removes the `plugins` array entry from
- * `opencode.json`, because that was how an earlier version registered and leaving both means
- * the same plugin loaded twice.
- *
- * Writing the file is `open` and one string, so it is not worth a helper. The config edit
- * is the part that needs code: `opencode.json` is hand-edited JSONC, and a `sed` or a
- * `JSON.parse` round trip on it destroys comments and unrelated keys.
+ * Write the plugin autoload file and remove its old plugins-array entry to avoid
+ * duplicate loading. JSONC edits preserve unrelated config and comments.
  */
 async function cmdRegisterPlugin(): Promise<number> {
   const file = pluginAutoloadFile()
   try {
     await mkdir(dirname(file.path), { recursive: true })
-    // Overwritten every run, so a moved checkout or an updated path self-heals. Only
-    // reported as a change when the bytes actually differ, so a re-run says "already".
+    // Refresh moved checkout paths; report a change only when the content differs.
     const same = (await readFile(file.path, "utf8").catch(() => "")) === file.contents
     await writeFile(file.path, file.contents)
     process.stdout.write(`${same ? "already registered" : "registered"}: ${file.path}\n`)
@@ -406,8 +336,7 @@ async function cmdRegisterPlugin(): Promise<number> {
     const result = unregisterPlugin(before, entry)
     if (result.removed === 0) return 0
 
-    // The same refuse-don't-clobber rule as `editConfig`: re-read before writing, because a
-    // person may have edited the file since we read it.
+    // Detect edits made since our first read.
     if ((await readFile(path, "utf8").catch(() => "")) !== before) {
       process.stderr.write(`${path} changed while this was running; not writing over it. Re-run.\n`)
       return 1
@@ -417,8 +346,7 @@ async function cmdRegisterPlugin(): Promise<number> {
       `removed ${result.removed} stale "plugins" entry from ${path}; autodetection covers it now\n`,
     )
   } catch (err) {
-    // Not fatal. The plugin is registered either way, and leaving the old entry in place
-    // only means it loads twice.
+    // Registration succeeded, but the remaining entry can cause duplicate loading.
     process.stderr.write(`note: could not clean ${path}: ${describeError(err)}\n`)
   }
   return 0
@@ -430,9 +358,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   // Before config loading, so it still works with no config file present at all.
   if (command === "config-path") return cmdConfigPath()
 
-  // The model commands read no config either. `install` in particular must work when the
-  // config is what needs fixing, and `runtimes`/`doctor` are diagnostics you reach for
-  // precisely when something is wrong.
+  // Installation and diagnostics must work before a valid config exists.
   if (
     command === "install" ||
     command === "uninstall" ||
@@ -488,12 +414,7 @@ if (import.meta.main) {
     },
     (err) => {
       process.stderr.write(`onesystem: ${describeError(err)}\n`)
-      // `process.exit(1)` here would discard the exit code `runDaemon` set on its way out.
-      // That code is a contract with `onesystem start`: 3 means "a sibling holds the lock
-      // and is serving", which the caller treats as success, because the goal — a daemon
-      // answering on this port — has been met by someone else. Exiting 1 instead made every
-      // lost race look like a crash, so `start` reported failure for a perfectly good
-      // daemon. Preserved via process.exitCode, which `exit` would otherwise overwrite.
+      // Preserve LOCK_BUSY_EXIT so start can wait for the winning daemon.
       process.exit(process.exitCode ?? 1)
     },
   )

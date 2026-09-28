@@ -1,17 +1,6 @@
 /**
- * The staging rename breaks console scripts, and `verify` did not notice.
- *
- * `uv sync` writes each console script's shebang as the absolute path of the environment
- * it just created. This module installs into `<dir>.partial` and then renames that to
- * `<dir>`, so every script in the finished runtime came out naming a path that no longer
- * exists:
- *
- *     #!/…/runtimes/laya.partial/.venv/bin/python
- *
- * Running one fails with `bad interpreter: No such file or directory`. The venv's own
- * `python` still works, and `verify` runs exactly that, so an install reported success and
- * published a runtime whose entry points were all dead. Found by installing from scratch and
- * then trying to use what it produced.
+ * Moving a staged runtime leaves absolute console-script shebangs pointing at the
+ * old path. Verify repair separately: running Python alone does not catch broken scripts.
  */
 
 import { describe, expect, test } from "bun:test"

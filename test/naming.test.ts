@@ -1,14 +1,6 @@
 /**
- * Tool naming across the bridge.
- *
- * The point of `toolPrefix` is that the surface reads `onesystem.predict` rather than
- * `onesystem.laya_predict`. That is a rename in both directions, and a rename done in
- * only one direction is worse than no rename at all: the catalog would advertise a name
- * the backend cannot answer to, and every call would fail with "unknown tool" against a
- * server that looked perfectly healthy.
- *
- * So this checks all three halves: the catalog comes back stripped, a call using the
- * stripped name reaches the backend, and the backend really saw its own prefixed name.
+ * Verify both directions of MCP tool renaming: list stripped names, accept those
+ * names in calls, and restore the backend's prefix before forwarding.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

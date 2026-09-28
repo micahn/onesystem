@@ -1,14 +1,6 @@
 /**
- * The subprocess seam.
- *
- * `install()` hands its hangs to this module, so the property worth pinning is not "it
- * spawns" — that is what a spawn does — but that a deadline actually *stops* the work. A
- * timeout that rejects while the child keeps running is a guess: the caller walks away
- * believing the process stopped, and `uv` is still holding the staging directory it was
- * told to write into.
- *
- * Every test here spawns something real. The alternatives are a fake timer over a fake
- * spawn, which would assert that the code calls `kill()` rather than that a process dies.
+ * Deadlines must stop real child processes before callers remove staging files.
+ * A mocked kill call cannot prove the process exited.
  */
 
 import { describe, expect, test } from "bun:test"

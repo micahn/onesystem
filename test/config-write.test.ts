@@ -1,10 +1,6 @@
 /**
- * `onesystem install` writes the config, because a printed block is a manual step.
- *
- * The flow used to end with the installer printing a snippet and the README telling you to
- * paste it. That copy was the only part of the install a person had to get right, and
- * nothing checked it: a block missing a key still parses, the daemon still starts, and the
- * mistake shows up as an error payload on the first tool call. These tests pin the write.
+ * Installed backend blocks must load through the real config validator and preserve
+ * user settings according to the merge rules.
  */
 
 import { describe, expect, test } from "bun:test"

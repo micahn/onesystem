@@ -1,9 +1,5 @@
 /**
- * Call accounting.
- *
- * The arithmetic is small, but it is the kind of small that is wrong in a way nobody
- * notices: a running mean that drops a failure looks like a speedup, and a counter that
- * resets on error makes a broken backend look unused.
+ * Usage totals and timing must include failures instead of making them look like speedups.
  */
 
 import { describe, expect, test } from "bun:test"

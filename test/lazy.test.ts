@@ -1,14 +1,6 @@
 /**
- * The lazy-start contract, end to end.
- *
- * The requirement being pinned here: loading the plugin must cost plugin memory and
- * nothing else, so no model may load until a request arrives. A unit test of the
- * supervisor would mock the child away and prove nothing, so this starts a real daemon
- * over a real HTTP port, pointed at a real MCP server in a real child process, and
- * watches a marker file the child writes when it spawns.
- *
- * The idle test uses a two-second window instead of the ten-minute production default,
- * because the behaviour under test is the mechanism, not the number.
+ * Check lazy startup through a real daemon and MCP child. A spawn marker proves
+ * that health, catalog, and plugin setup load nothing. Idle tests use a short window.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
@@ -330,4 +322,3 @@ describe("idle shutdown", () => {
     await daemon.finished
   }, 45_000)
 })
-

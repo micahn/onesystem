@@ -1,14 +1,5 @@
 /**
- * The HTTP front, tested against a port that is not a supervisor.
- *
- * This file exists because the seam used to be closed. `serve()` took the concrete
- * `Supervisor` class, and `Supervisor` built its own backends from config in its own
- * constructor, so nothing could be injected: testing a route meant booting a real daemon
- * with a real port, a real lock, and a real child process. The `Backend` interface was a
- * real seam with two adapters behind it, and no way to reach it.
- *
- * `BackendPort` is that way through. A route test now needs a `Pick` of four methods and
- * no GPU.
+ * Exercise HTTP routes through a small BackendPort fake without starting a model.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
@@ -24,12 +15,7 @@ afterEach(async () => {
 })
 
 /**
- * Listen on an ephemeral port.
- *
- * `port: 0` is the kernel's "pick a free one" request, and `requireNumber` refuses zero,
- * so the request is made in the config's own terms: the default port, with the real port
- * read back off the listener. That is also what a caller does in practice — `serve` exists
- * to bind, and the bound address is the truth.
+ * Listen on a kernel-selected port and use the address returned by the listener.
  */
 async function listen(backends: BackendRoutes): Promise<{ daemon: RunningDaemon; url: string }> {
   const config = validate({ port: 0, idleShutdownSecs: 300, idleSweepSecs: 5 }, "test")

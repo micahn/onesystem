@@ -1,10 +1,5 @@
 /**
- * The installer's decisions, tested without a GPU or a network.
- *
- * The parts worth testing are the ones that fail silently. A wrong wheel index does not
- * raise: it installs something that imports cleanly and then runs on the CPU, which on
- * this machine has already happened once. So the manifest and the check that guards it
- * are asserted here, against lock files both ways.
+ * Check manifests, accelerator lock checks, and generated config without a GPU or network.
  */
 
 import { describe, expect, test } from "bun:test"

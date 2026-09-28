@@ -1,56 +1,9 @@
 /**
- * Installing a model: a Python environment onesystem owns.
- *
- * ## Why not just `pip install`
- *
- * Because `laya` declares `torch>=2.0.0` and nothing about accelerators. On Linux the
- * default PyPI torch wheel is the CUDA build, so `pip install laya` *always* means CUDA
- * torch. On this machine that had already happened: 3.2 GB of `nvidia-*` packages and
- * 1.1 GB of CUDA triton sitting in a venv on an AMD card, unreferenced and unusable,
- * left behind because force-installing the ROCm wheel over the top does not uninstall the
- * dependencies the CUDA one declared.
- *
- * So the pin has to be on the *source*, not the version. A constraint file pins
- * `torch==2.14.0` and both wheels answer to that. What actually works is a source pin:
- * torch may only come from the ROCm index, and everything else still comes from PyPI,
- * because `laya` is not on the ROCm index and a naive `--index-url` swap fails outright.
- *
- * That is one line of uv configuration and it is the entire reason this module exists
- * rather than a shell script in the README:
- *
- *     [[tool.uv.index]]
- *     explicit = true   # reachable ONLY for the names listed in tool.uv.sources
- *
- * ## What is not reimplemented
- *
- * Resolution, hashing, and installation are uv's. This module writes a manifest, runs
- * `uv lock`, runs `uv sync`, and then checks the result. It does not have a dependency
- * solver, and adding one to a project whose entire premise is "one process, shared
- * weights" would be absurd.
- *
- * ## Everything goes through the project's one subprocess seam
- *
- * This module used to have a private `run()` with no deadline, no kill, and no
- * cancellation, accumulating output into unbounded strings. `onesystem install` is the
- * longest-running command in the project — it downloads several gigabytes and spends
- * minutes inside `uv` — so a hung `uv lock` on a flaky network, a wedged `uv sync`, or a
- * `verify()` whose `import torch` stalls behind a busy GPU left it waiting forever with no
- * diagnostic. The daemon had already solved the deadline problem and expressed it once, in
- * `async.ts`; this was a third, weaker answer to the same question.
- *
- * So the runner is `src/subprocess.ts`, shared, and it is *threaded* rather than imported
- * at each site: `install`, `detectGpu` and `verify` all take a `Runner`. That is what makes
- * the sequence below testable, which matters because the sequence is this module's actual
- * subject — twelve steps whose order is the whole of its crash-safety argument, and which
- * no test could reach before. `test/install-steps.test.ts` drives the whole thing against a
- * script, detection included.
- *
- * ## Detection fails closed
- *
- * If the GPU cannot be positively identified, nothing is installed. The alternative —
- * defaulting to something — is how you get a CPU-only install that works fine until
- * someone measures a 40x slowdown. `uv pip install --torch-backend=auto` does exactly
- * that: on this machine it resolved `torch==2.14.0+cpu`, silently, with exit code 0.
+ * Build owned Python runtimes with uv. Identify the GPU before installing.
+ * On AMD, pin PyTorch and Triton to the ROCm source index; a version pin alone
+ * also permits CUDA wheels. Other packages still resolve from PyPI.
+ * Build and verify in staging before replacing the runtime. Keep weights separate.
+ * Every subprocess uses the injected Runner for deadlines and test control.
  */
 
 import { chmod, mkdir, open, readFile, readdir, rename, rm, writeFile, type FileHandle } from "node:fs/promises"
@@ -62,14 +15,8 @@ import type { ModelSpec } from "./models.ts"
 import type { StdioBackend } from "./backend/spec.ts"
 
 /**
- * The ROCm wheel index.
- *
- * The boring one, deliberately. AMD's newer multi-arch distribution at
- * `stable.repo.amd.com` would be roughly 1.1 GB instead of 6.2 GB because it ships only
- * your card's kernels, and it is a better answer on disk — but it depends on a package
- * named `rocm` that also exists on PyPI as an unrelated 0.1.0 stub, and resolving it
- * reliably needs source pins for the whole SDK. That is a second index to keep working,
- * for a saving on a one-time download. Add it when the disk actually matters.
+ * PyTorch's ROCm index. AMD's smaller multi-arch distribution needs source pins
+ * for its whole SDK because its `rocm` package name conflicts with a PyPI stub.
  */
 export const ROCM_INDEX = {
   name: "pytorch-rocm",
@@ -77,11 +24,7 @@ export const ROCM_INDEX = {
 } as const
 
 /**
- * Interpreter names that must never appear in a resolved environment on an AMD card.
- *
- * This is the check that would have caught the original mistake, and it is a denylist on
- * names rather than a judgement about a version string. `torch.version.cuda is None` in
- * the venv is the other half; this one runs before anything is downloaded.
+ * Reject CUDA package names in AMD lock files before downloading runtime wheels.
  */
 const FORBIDDEN_ON_AMD = /^(nvidia-|cuda-|cuda$|triton$)/
 
@@ -105,24 +48,16 @@ function dataRoot(): string {
 }
 
 /**
- * Where interpreters live.
- *
- * Rebuilt on every install, and nothing else may live here: an install removes this
- * directory and moves a freshly synced one into its place, so anything a user put inside
- * it is destroyed by the next `onesystem install`. That is not hypothetical -- model
- * weights were briefly stored here and lost to a reinstall.
+ * Runtime root. Each model directory is replaced on reinstall; keep user files
+ * and weights elsewhere.
  */
 export function runtimesRoot(): string {
   return join(dataRoot(), "runtimes")
 }
 
 /**
- * Where model weights live, if a model needs them locally.
- *
- * Separate from the runtime because they are a different thing with a different
- * lifecycle: a runtime is disposable and rebuilt, a checkpoint is 550 MB and does not
- * change when the Python does. Sharing a venv between two models would be the other way
- * to avoid the duplication, and the models' transformers pins already rule that out.
+ * Persistent weights, separate from disposable runtimes. Models need separate
+ * environments because their dependency pins differ.
  */
 export function weightsDir(model: string): string {
   return join(dataRoot(), "weights", model)
@@ -133,10 +68,7 @@ export function runtimeDir(model: string): string {
 }
 
 /**
- * Ask whether a command exists.
- *
- * `sh -c "command -v X"` rather than a spawn of `X` itself: probing a binary by running
- * it is not a probe, and the shell form is the one that answers without side effects.
+ * Check command availability without running the command.
  */
 async function have(cmd: string, runner: Runner): Promise<boolean> {
   const { code } = await runner("sh", ["-c", `command -v ${cmd}`])
@@ -144,17 +76,8 @@ async function have(cmd: string, runner: Runner): Promise<boolean> {
 }
 
 /**
- * Identify the GPU, or refuse.
- *
- * Vendor from `lspci`, which needs no ROCm install at all. Arch from `rocm-smi`, which
- * prints it directly on this machine. `/sys/class/kdev` is not used: it is a Tegra path
- * and does not exist here, so a detection ladder that includes it is a ladder that fails
- * on a machine that has a perfectly good GPU.
- *
- * Detection is a sequence of subprocesses, so it takes the runner rather than reaching for
- * one. That is not only for tests: it is what lets a scripted runner stand in for the whole
- * machine, and `test/install.test.ts` drives an entire install — detection included — by
- * answering `lspci` and `rocm-smi` from a script.
+ * Detect the vendor with lspci and the AMD target with rocm-smi. Refuse unknown
+ * hardware rather than guess a wheel index. The runner lets tests supply GPU data.
  */
 export async function detectGpu(runner: Runner): Promise<Gpu> {
   const lspci = await have("lspci", runner)
@@ -163,18 +86,7 @@ export async function detectGpu(runner: Runner): Promise<Gpu> {
   const vendorLine = lspci?.stdout ?? ""
 
   if (/NVIDIA/i.test(vendorLine)) return { vendor: "nvidia" }
-  // Word-bounded, and the boundaries are the entire fix.
-  //
-  // `lspci` prints the vendor in a bracket tag — "[AMD/ATI]", "[NVIDIA Corporation]",
-  // "[Intel Corporation]" — so the token is there to be matched. Unanchored, `/AMD|ATI/i`
-  // also matched "Intel Corpor*ati*on", so a machine with an Intel iGPU was read as AMD and
-  // sent on to demand `rocm-smi` and a gfx target that a machine without an AMD card does
-  // not have. It still failed closed, so no wrong install was ever possible: the cost was
-  // a refusal that named the wrong vendor on the way there, which is a poor way to tell
-  // someone their lspci is fine and their card is not supported.
-  //
-  // The NVIDIA test above is left unanchored on purpose, because no other vendor's name
-  // contains "NVIDIA" as a substring. It is not evidence that anchoring does not matter.
+  // Word boundaries prevent ATI from matching the text "Intel Corporation".
   if (!/\b(?:AMD|ATI)\b/i.test(vendorLine)) {
     throw new Error(
       "could not identify the GPU vendor from lspci; refusing to install rather than " +
@@ -198,34 +110,12 @@ export async function detectGpu(runner: Runner): Promise<Gpu> {
 }
 
 /**
- * The manifest uv resolves against.
- *
- * `torch` and both spellings of its triton companion are declared explicitly even though
- * nothing imports them, because `[tool.uv.sources]` binds only to *declared* dependencies.
- * A source pin for a package that is merely transitive does nothing, silently — which
- * looks exactly like the pin working right up until CUDA torch is what gets installed.
- *
- * The AMD branch is the one this machine can check, and both are now tested because the
- * signature no longer supplies a default to fall back on. The NVIDIA branch is
- * deliberately the *absence* of work: PyPI's default Linux torch wheel is already the
- * CUDA build, so naming no accelerator index is the correct configuration rather than an
- * omitted one. That is also why it needs no cu-version decision, which from a machine
- * that cannot check one would be a guess dressed as a default.
- *
- * `gpu` is required, and that is the point. It used to default to
- * `{ vendor: "amd", gfx: "gfx1201" }` — this machine's card — so a caller on an NVIDIA box
- * could write `pyprojectFor(spec)` and get an AMD manifest: ROCm index, `triton-rocm`, and
- * a `gfx1201` arch check, for a card that is not there. A defaulted hardware fact in a
- * public signature is a signature that permits a lie, and it is also why the NVIDIA branch
- * had no coverage at all: the only test on this machine called it with no argument and got
- * the default, so the branch nobody here can run was the one nobody exercised.
+ * Generate a manifest for the detected GPU. uv source pins require direct
+ * dependencies, so AMD declares torch and both ROCm Triton package names.
+ * NVIDIA uses PyPI's Linux CUDA wheel without an accelerator index override.
  */
 export function pyprojectFor(spec: ModelSpec, gpu: Gpu): string {
-  // A model that has to be fetched is installed from the local copy the fetch step left,
-  // not from its repository — see ModelSpec#source for why a git source does not work.
-  // A fetched model is pinned by the revision recorded in meta.json, not by a version
-  // string, so the requirement is just the distribution name and the path source below
-  // supplies the rest.
+  // Fetched packages use a local source path instead of a PyPI version pin.
   const local = spec.source ? `${spec.name}-src` : null
   // A fetched model contributes its own dependencies; the runtime also needs the MCP
   // SDK, because the shim that puts it behind a tool surface runs inside this
@@ -234,17 +124,7 @@ export function pyprojectFor(spec: ModelSpec, gpu: Gpu): string {
   const requirement = local ? spec.requirement.replace(/==.*/, "") : spec.requirement
   const declared = [requirement, ...extra]
 
-  // A model that was fetched is installed from the local copy, and that pin is
-  // orthogonal to the accelerator: it says where the *package* came from, not which
-  // wheel index to look in.
-  //
-  // It used to be written only into the AMD template, so the NVIDIA branch declared a
-  // fetched model by name and version and nothing else — `dependencies = ["supersonic-
-  // julia"]` with no `[tool.uv.sources]`, asking PyPI for a package that is not on PyPI.
-  // `uv lock` would fail on any NVIDIA machine trying to install julia, with a resolution
-  // error that says nothing about a manifest this file wrote. The branch had no coverage,
-  // which is the only reason it survived: the default in the signature meant the AMD
-  // manifest was the only one anybody here could produce.
+  // Both GPU branches need the local source for packages absent from PyPI.
   const localSource = local
     ? `\n[tool.uv.sources]\n${requirement} = { path = "${local}" }\n`
     : ""
@@ -295,10 +175,7 @@ explicit = true
 }
 
 /**
- * Parse a `uv.lock` and refuse to continue if an AMD box would get NVIDIA packages.
- *
- * Runs on the lock file, before a single byte is downloaded. The alternative is
- * discovering it afterwards, when the fix is deleting six gigabytes.
+ * Check AMD lock files for CUDA packages and a non-ROCm torch build before uv sync.
  */
 export function assertNoAcceleratorMixups(lock: string, gpu: Gpu): void {
   if (gpu.vendor !== "amd") return
@@ -337,42 +214,21 @@ export function assertNoAcceleratorMixups(lock: string, gpu: Gpu): void {
 
 export interface InstallOptions {
   /**
-   * The project's subprocess seam.
-   *
-   * Required rather than defaulted to the real `run`, deliberately. A default here is the
-   * same shape of trap as the defaulted `gpu` this module used to carry: it makes the
-   * mocked path the one you get by accident, and it means the seven call sites below can
-   * each quietly reach for a different runner. One caller (`cmdInstall`) passes the real
-   * one; a test passes a script.
+   * Required runner for all subprocesses. The CLI supplies run; tests supply a script.
    */
   runner: Runner
   /** Skip the download and only resolve. Useful for checking a manifest. */
   lockOnly?: boolean
   onProgress?: (message: string) => void
   /**
-   * Deadline for each of the install's subprocesses.
-   *
-   * One knob rather than four because they are the same kind of wait — a build step making
-   * network requests — and a caller with a slow link has one problem, not four. Generous
-   * by default; it is here to stop a hang, not to police a download.
+   * Deadline per subprocess. Increase for slow downloads.
    */
   timeoutMs?: number
 }
 
 /**
- * Install a model into a runtime directory onesystem owns.
- *
- * Written last, not first: a directory with a `meta.json` is a finished install, and one
- * without is garbage from a killed run. `listRuntimes` treats the second as absent, so a
- * half-install is invisible rather than half-working.
- *
- * Every step is a subprocess, which is what makes this function's real subject — the
- * *order* — testable at all. It was written last, in an order chosen carefully, and read by
- * nobody who could check it: the crash-safety argument below rests entirely on staging and
- * `meta.json` being the only things that make a directory look installed, and not one line
- * of it was reachable from a test. `test/install.test.ts` now runs the whole thing against
- * a scripted runner, including the paths that used to be untestable and mattered most:
- * `uv sync` failing, `verify()` failing, and what is left on disk when either happens.
+ * Resolve, sync, and verify in staging before replacing a runtime. Write meta.json
+ * only after verification; listRuntimes uses it to identify completed installs.
  */
 export async function install(spec: ModelSpec, options: InstallOptions): Promise<Runtime> {
   const { runner, timeoutMs = DEFAULT_TIMEOUT_MS } = options
@@ -391,20 +247,7 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
   await rm(staging, { recursive: true, force: true })
   await mkdir(staging, { recursive: true })
 
-  // Everything from here to the rename is inside this, and the removal on the way out is
-  // the module's crash-safety claim made true rather than merely asserted.
-  //
-  // It used to remove the staging directory in exactly one place — the `verify` failure —
-  // while `uv lock` failing, `uv sync` failing, a fetch failing, and a dependency check
-  // throwing all left it behind. That was survivable, because `listRuntimes` skips
-  // `.partial` and the next install removes it before starting, but it left the directory
-  // holding claim to be *the* invariant: no directory with a `meta.json`, and no
-  // `<name>.partial`, exists after any failure past staging. It was true of the one path
-  // it was written for and false of the other four, and the comment claiming it was not
-  // checked by anything. Now it is one `catch`, and it holds for all of them.
-  //
-  // Weights are deliberately not in staging and are not touched here: they are fetched to
-  // their own directory precisely so they survive a failed install.
+  // Remove staging on every failure. Weights live outside staging and survive cleanup.
   try {
     let revision: string | undefined
     if (spec.source) {
@@ -417,9 +260,7 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
     }
     await writeFile(join(staging, "pyproject.toml"), pyprojectFor(spec, gpu))
 
-    // The two steps that can hang for minutes, each with its own name in the failure. A
-    // bare "timed out" tells a user nothing they can act on, and `uv lock` and `uv sync`
-    // fail for entirely different reasons — one is resolution, the other is the download.
+    // Name the failed step so resolution and download errors can be distinguished.
     const lock = await runner("uv", ["lock"], { cwd: staging, timeoutMs })
     if (lock.timedOut) throw new Error(`uv lock did not finish within ${timeoutMs}ms`)
     if (lock.code !== 0) throw new Error(`uv lock failed:\n${lock.stderr.trim()}`)
@@ -444,9 +285,7 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
       throw new Error(`the installed environment failed its checks:\n  ${check.problems.join("\n  ")}`)
     }
 
-    // The published directory is replaced, not merged, and only once there is something
-    // verified to put in it. `rm` before `rename` is what makes this atomic from the
-    // reader's side: `dir` is either the old runtime or absent, never half of each.
+    // Replace only after verification. The old runtime is briefly absent before rename.
     await rm(dir, { recursive: true, force: true })
     await writeFile(
       join(staging, "meta.json"),
@@ -466,11 +305,7 @@ export async function install(spec: ModelSpec, options: InstallOptions): Promise
 }
 
 /**
- * Fetch a model's Python package without its weights.
- *
- * `huggingface_hub` is run ephemerally rather than added to anything: it is a build-time
- * tool here, and the runtime must not carry a dependency the model does not have. uv
- * caches it, so repeat installs cost nothing.
+ * Fetch package files without weights. uv caches the temporary huggingface_hub tool.
  */
 async function fetchModelSource(
   spec: ModelSpec,
@@ -519,11 +354,7 @@ async function fetchWeights(
   })
   if (res.timedOut) throw new Error(`fetching weights for ${spec.name} did not finish within ${timeoutMs}ms`)
   if (res.code !== 0) throw new Error(`could not fetch weights for ${spec.name}:\n${res.stderr.trim().slice(-600)}`)
-  // Written last, so an interrupted download is retried rather than trusted. This is the
-  // whole of the resume story, and it is a single file's existence: no `.complete` means
-  // 550 MB is fetched again, which is expensive and correct. A run killed between the
-  // download and this line re-downloads, and there is no state in which a partial
-  // checkpoint looks complete.
+  // Mark completion last so an interrupted fetch is retried.
   await writeFile(join(into, ".complete"), new Date().toISOString())
 }
 
@@ -532,28 +363,9 @@ export function pythonIn(dir: string): string {
 }
 
 /**
- * Rewrite console-script shebangs that name the staging directory.
- *
- * `uv sync` bakes the absolute path of the environment it created into the shebang of every
- * console script it installs, because a shebang has to name a real file and cannot be
- * relative. This module builds in `<dir>.partial` and then renames it to `<dir>`, so every
- * script in the published runtime came out pointing at a path that no longer exists:
- *
- *     #!/…/runtimes/laya.partial/.venv/bin/python
- *
- * Running one fails with `bad interpreter: No such file or directory`, which names a
- * language runtime rather than the model, and the venv's own `python` still works, so
- * `verify()` passed. It checked the interpreter and never the entry points beside it.
- *
- * The alternative is to make the staging path irrelevant, by pointing uv's
- * `UV_PROJECT_ENVIRONMENT` at the final path while the project files stay in staging. That
- * works, and it was rejected for a reason worth keeping: it creates the venv in the
- * published directory *before* anything has been verified, so a failed install would leave a
- * half-updated environment where a working one used to be. The staging-then-rename is the
- * crash-safety argument for the whole module, and this is a cheaper way to keep it.
- *
- * Only shebangs naming the staging directory are touched. A script pointing anywhere else
- * was not put there by this rename and rewriting it would be a guess.
+ * Repair absolute shebangs after moving the staged environment. Python itself can
+ * pass verification while console scripts still point to the deleted staging path.
+ * Change only shebangs naming staging; preserve other interpreters and script bodies.
  */
 export async function repairShebangs(dir: string, staging: string, python: string): Promise<number> {
   const bin = join(dir, ".venv", "bin")
@@ -567,9 +379,7 @@ export async function repairShebangs(dir: string, staging: string, python: strin
   let fixed = 0
   for (const name of entries) {
     const file = join(bin, name)
-    // Read a bounded prefix. A console script is a few hundred bytes; a stray binary in
-    // here is megabytes, and reading those to look at a shebang is how a repair pass turns
-    // into an out-of-memory error.
+    // Read only a prefix when checking large binaries for a shebang.
     let handle: FileHandle | undefined
     try {
       handle = await open(file, "r")
@@ -593,16 +403,8 @@ export async function repairShebangs(dir: string, staging: string, python: strin
 }
 
 /**
- * Check a runtime against the GPU it will run on.
- *
- * The cheap discriminator is `torch.version.cuda is None`: a ROCm build reports no CUDA
- * version and does have a HIP one. Everything else here is a refinement, but they are what
- * turn "wrong build" from a silent 40x slowdown into an error at install time.
- *
- * Exported because `onesystem doctor` runs it against an already-installed runtime, and it
- * takes the runner for the same reason `install` does: this is the step whose `import
- * torch` can hang behind a busy GPU, and a test cannot reach any of the branches below
- * without being able to answer with a torch that has the wrong properties.
+ * Check PyTorch and GPU visibility for install and doctor. A ROCm build reports a
+ * HIP version and no CUDA version. Bound the import through the supplied runner.
  */
 export async function verify(
   dir: string,
@@ -662,8 +464,7 @@ export async function listRuntimes(): Promise<Runtime[]> {
     const installed = existsSync(python) && existsSync(join(dir, "meta.json"))
     let meta: Runtime["meta"]
     if (installed) {
-      // A missing or unreadable meta.json means `installed` is already false, so this
-      // only has to survive a truncated file.
+      // Read metadata only when the completion marker and interpreter exist.
       meta = JSON.parse(await readFile(join(dir, "meta.json"), "utf8"))
     }
     out.push({ name: entry.name, dir, python, installed, meta })
@@ -679,37 +480,9 @@ export async function uninstall(name: string): Promise<boolean> {
 }
 
 /**
- * The config snippet that points a backend at an installed runtime.
- *
- * It has to be a snippet `validate` accepts, because the README tells people to paste it
- * and the shipped config tells them this is where the real paths come from. It was neither.
- * It omitted `tools`, which `validate` rejects, and for a model with no local weights it
- * printed `"command": ["/path/to/shim"]` -- a placeholder in the one output whose entire
- * job is to contain no placeholders. So the documented happy path produced a config that
- * could not load, and the failure named a missing `tools` key rather than the install.
- *
- * `tools` cannot be derived from the model without loading it, which is the 20-54s cost
- * this project exists to avoid, so a model declares its own surface and the hint prints it.
- * That makes `ModelSpec.tools` a claim about the model that nothing can check, which is
- * the same trade the shipped config makes and for the same reason.
- */
-/**
- * The config block for an installed model, as an object.
- *
- * This is the source of truth for both the file `onesystem install` writes and the snippet
- * it prints, so the two cannot describe different backends. It used to be a printed string
- * only, which is why installing a model and using it were two steps with a copy between
- * them, and why the copy was the one step that could go wrong in a way nothing detected.
- *
- * The `command` is resolved, not guessed, in this order:
- *
- *   1. the model's `entryPoint` inside the runtime this install just created
- *   2. this repo's shim, for a model that ships a library and no server
- *   3. a `REPLACE:` marker, because a wrong path is worse than an obvious gap
- *
- * Step 1 is what makes the install complete. laya's venv contains `laya-mcp-server`, and
- * its shebang is the venv's own interpreter, so the venv is also the answer to "which
- * python has the ROCm build" -- there is nothing left for a person to work out.
+ * Build one config block for both writing and printing. Resolve the command from
+ * the installed entryPoint, then this repo's shim, then an explicit REPLACE marker.
+ * Use declared tools so config generation does not start a model.
  */
 export async function backendFor(spec: ModelSpec, runtime: Runtime): Promise<StdioBackend> {
   // `tools` is optional on the type but required for a config to load: `validate` rejects
@@ -743,9 +516,7 @@ async function resolveCommand(spec: ModelSpec, runtime: Runtime): Promise<string
   if (spec.entryPoint) {
     const bin = join(runtime.dir, ".venv", "bin", spec.entryPoint)
     if (existsSync(bin)) return [bin]
-    // Fall through to the marker rather than returning a path that is not there. A
-    // `command` naming a missing file is the exact failure this project keeps trying to
-    // make loud, and it is louder as a REPLACE marker than as a plausible-looking path.
+    // Use the fallback instead of returning a nonexistent binary path.
   }
   if (spec.weights) {
     // A model that ships a library: the runtime's interpreter runs our shim beside it.
@@ -761,13 +532,7 @@ export function needsManualCommand(backend: StdioBackend): boolean {
 }
 
 /**
- * The same block as text, for printing.
- *
- * Printing is still the right answer in the two cases where writing is not available or not
- * wanted: no config file to edit, and `--no-config`. It renders the object `backendFor`
- * produced rather than assembling a second copy, because it used to assemble a second copy
- * and the two drifted -- the printed one lost its `env` braces and its `tools` while the
- * written one did not, which is a difference nobody would notice until a paste failed.
+ * Render the same backend object for --no-config or a failed config write.
  */
 export function renderBackend(name: string, backend: StdioBackend): string {
   const lines = JSON.stringify(backend, null, 2).split("\n")

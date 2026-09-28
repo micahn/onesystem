@@ -1,9 +1,5 @@
 /**
- * Config validation.
- *
- * The case that matters is refusal. A backend with a missing or malformed `command`
- * would otherwise start a daemon that listens, answers, and is talking to nothing, which
- * is far more expensive to debug than a boot that stops and names the field.
+ * Reject invalid config at load time with a field-specific error.
  */
 
 import { describe, expect, test } from "bun:test"

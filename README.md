@@ -1,459 +1,200 @@
 # onesystem
 
-One shared System 1 decision service on the GPU, fronted over HTTP, shared by every
-opencode session.
-
-## Why this exists
-
-The setup this replaces had three problems, all measured on this machine.
-
-**Every session loaded its own copy of the model.** opencode spawns one MCP server per
-session directory. With laya configured as a local stdio server, eight open sessions
-meant eight processes, each holding a checkpoint — roughly 3 GB of VRAM and a cold start
-each, for one shared model.
-
-**The cold start looked like a CPU fallback.** A fresh session blocked 20-54s on the
-first `laya_predict`. The work was all on the GPU; the process was simply silent while
-importing `transformers` (25-30s) and then loading the checkpoint. The venv carries the
-ROCm torch build and the mise interpreter does not, so a wrong interpreter degrades to
-CPU *silently* — which is exactly how this was first misdiagnosed.
-
-**Editing the MCP config dropped in-flight calls.** opencode reconnects every MCP server
-when the config changes, so a hand-edit mid-session kills the `laya_predict` that other
-sessions are waiting on.
-
-onesystem fixes all three by making the model a single shared resource with one owner.
-
-## How it works
-
-```
-  opencode session A ─┐
- opencode session B ─┼─→ plugin ──→ onesystem daemon ──→ laya (stdio MCP)  ──→ GPU
- opencode session C ─┘   (V2)         (one, locked)  └─→ rev  (systemone-http)
-
-Tools are exposed as `onesystem.<tool>`: `onesystem.predict`, `onesystem.route`,
-`onesystem.status`, `onesystem.preset`.
-```
-
-- The **plugin** runs in every session. It ensures one daemon is up and registers one
-  remote MCP server per backend. It never loads a model.
-- The **daemon** owns the process. It takes an exclusive lock, binds a loopback port, and
-  fronts each backend as MCP over Streamable HTTP.
-- The **backend** is the only thing that touches the GPU, and only when a request arrives.
-
-## The two properties that matter
-
-**Loading the plugin costs plugin memory and nothing else.** The daemon binds its port
-and answers `/health` before any model exists. `onesystem start` returns in ~190ms and
-spawns no model process. The first `tools/call` is what pays the load.
-
-**Nothing can start a second instance.** Many sessions load the plugin simultaneously and
-all of them decide the service is down. `src/lock.ts` resolves that with
-`open(path, "wx")`, which the kernel makes atomic, so exactly one process creates the
-lock file and the rest are told who holds it. The TCP bind is a second, independent layer:
-if the lock file is ever lost, only one process can own the port, so a duplicate fails
-loudly instead of quietly doubling VRAM usage.
-
-This is not theoretical. A leftover daemon from a failed test run held the lock during
-development, and the next `onesystem start` refused to start — which is the behaviour
-working, not a bug.
+Share one GPU decision service across OpenCode sessions. Models load on the first
+request and stop when idle.
 
 ## Install
 
-One command, if your machine already has the prerequisites below:
+Requires OpenCode V2, Git, curl, Bun, uv, and an AMD or NVIDIA GPU.
+See [requirements](#requirements) for GPU setup.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
 ```
 
-It clones to `~/.local/share/onesystem/repo`, builds the model, writes your config, and drops
-a one-line file into `~/.config/opencode/plugins/` so opencode finds the plugin by itself.
-Safe to re-run: every step checks before it acts, nothing is overwritten without asking, and
-the only thing it will not do unprompted is run `sudo`. Set `ONESYSTEM_MODEL=julia` for the
-other model, or `ONESYSTEM_DIR=/path` to put the checkout somewhere else.
+The installer clones to `~/.local/share/onesystem/repo`, installs laya, writes the
+config, and registers the plugin. You can run it again to update the checkout;
+it skips installed runtimes and asks before running `sudo`.
 
-Restart opencode afterwards. Plugins load at server start, so a session that is already open
-will not see the tools. `opencode plugin list` shows what loaded.
+Restart OpenCode, then run `opencode plugin list` to check that `onesystem` loaded.
+The first tool call loads the model. Warm calls take tens of milliseconds.
 
-The steps below are what that script does, in case you would rather run them yourself.
+[Manual install](#manual-install) · [Julia or a custom path](#installer-options) ·
+[Existing laya setup](#existing-laya-setup)
 
-### 0. Prerequisites
+## Use
 
-**opencode V2.** onesystem is a V2 plugin and V1 has no plugin API, so on V1 the tools never
-appear and nothing explains why. Check with `opencode --version`. If yours is mise-managed
-and reports 1.x, install V2 alongside it and put the V2 binary first on `PATH` — installing
-V2 does not displace a mise-managed V1. The daemon and the CLI work fine under V1, so
-`onesystem start` and `onesystem status` are still useful for checking an install when the
-plugin cannot load.
+The plugin starts the shared daemon as needed. To run commands yourself, open the
+checkout:
 
 ```sh
-mise use -g bun uv          # or: curl -fsSL https://bun.sh/install | bash
+cd ~/.local/share/onesystem/repo
+bun run src/cli.ts status
 ```
 
-**ROCm, on an AMD card.** `onesystem install` reads the GPU vendor from `lspci` and the gfx
-target from `rocm-smi`, and refuses rather than guessing, so it will not start without both.
-Neither is part of a stock desktop install:
+Use `bun run src/cli.ts <command>` for each command below. If you have added the
+package's CLI to `PATH`, you can use `onesystem <command>` instead.
+
+| Command | Action |
+| --- | --- |
+| `start` | Start the daemon if needed. Safe across concurrent sessions. |
+| `status` | Show status as JSON without loading a model. |
+| `stop` | Stop the daemon and its local backends. |
+| `serve` | Run the daemon in the foreground. |
+| `runtimes` | List installed runtimes. |
+| `doctor [model]` | Check an installed runtime against the GPU. |
+| `install <model>` | Install laya or julia and enable it. |
+| `use <model>` | Enable one configured backend and disable the others. |
+| `uninstall <model>` | Remove its runtime. Keep downloaded weights. |
+| `config-path` | Show the config path. |
+| `register-plugin` | Register this checkout with OpenCode. |
+
+Installing or selecting a model disables the other backends. After a config change,
+stop the daemon and restart OpenCode to reload the config and tool names.
+
+Logs: `~/.local/state/onesystem/daemon.log`.
+
+## How it works
+
+```text
+OpenCode sessions -> plugin -> shared HTTP daemon -> local MCP process -> GPU
+                                                -> existing HTTP service
+```
+
+- The plugin registers native tools from `GET /catalog` and sends calls to `POST /call`.
+- Startup and status checks load no model. The first backend request starts the process.
+- An atomic file lock and the listening port prevent duplicate daemons.
+- After 600 seconds idle, local backends stop. Once all are cold, a previously used
+  daemon exits. The plugin starts it again before the next tool call.
+- Closing one session leaves the shared daemon running for the others.
+
+Other clients can use MCP Streamable HTTP at `/mcp/<backend>`.
+
+## Configuration
+
+Edit `~/.config/onesystem/onesystem.jsonc`. The `.json` filename also works.
+See the [annotated template](onesystem.config.jsonc) for backend examples.
+Its paths are placeholders; `install <model>` writes the real paths.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | Loopback only; the service has no authentication. |
+| `port` | `7331` | HTTP port. |
+| `idleShutdownSecs` | `600` | Stop an idle local backend after this many seconds. |
+| `idleSweepSecs` | `5` | Seconds between idle checks. Must not exceed the idle window. |
+| `requestTimeoutSecs` | `120` | Maximum seconds for a forwarded call. |
+| `backends` | `{}` | Backend definitions. |
+
+### Backends and tools
+
+- `stdio-mcp`: onesystem starts and stops a local MCP process. Used by laya and julia.
+- `systemone-http`: forwards a `systemone` tool to an existing `POST /v1/systemone`
+  service, such as rev. Start that service separately. The adapter passes the body
+  through; its schema has not been checked against a live service.
+
+Each `stdio-mcp` backend must declare `tools` without its `toolPrefix`. The daemon
+serves this list without starting the model. Update it when a backend adds or renames
+tools. MCP `tools/list` returns the backend's actual schemas but starts the process.
+
+The plugin strips `toolPrefix` from displayed names. With one backend, tools use
+names such as `predict`. With several, they use `laya_predict` and `julia_predict`.
+Enable `routing` and set its `default` to let one backend keep unqualified names.
+Routing only applies with multiple backends; `routing.tasks` provides logged guidance,
+not automatic dispatch. `serverName` overrides the server name in status reports.
+
+For laya, keep `LAYA_PRELOAD: "0"` to load weights only on use. Put `LAYA_PYTHON`
+in the backend's `env` when its command needs an explicit interpreter. The installed
+`laya-mcp-server` uses its own virtual environment's interpreter.
+
+## Install options
+
+### Requirements
+
+- OpenCode V2. Check `opencode --version`. If mise still selects V1, put the V2
+  binary first on `PATH`. This plugin uses the V2 API.
+- Git, curl, Bun, and uv. With mise: `mise use -g bun uv`.
+- `lspci` from `pciutils` to detect the GPU vendor.
+- For AMD, ROCm and `rocm-smi` on `PATH`. NVIDIA uses the CUDA install path and
+  does not need ROCm.
+
+On Arch or Omarchy, install the AMD detection tools:
 
 ```sh
-sudo pacman -S pciutils rocm-core      # Arch, and therefore Omarchy
+sudo pacman -S pciutils rocm-core
+export PATH=/opt/rocm/bin:$PATH
+rocm-smi --showproductname
 ```
 
-`rocm-smi` lands in `/opt/rocm/bin`, which must be on your `PATH`. On Omarchy that is
-already true. Elsewhere: `export PATH=/opt/rocm/bin:$PATH`.
+The last command must print a GFX Version. The installer stops if it cannot identify
+the GPU or the AMD target. The first runtime install takes several minutes, mostly
+to download PyTorch.
 
-To confirm before installing anything:
+### Installer options
 
-```sh
-rocm-smi --showproductname    # must print a GFX Version
-```
+Set these variables before running the curl command:
 
-If that command is missing, stop here. On an NVIDIA card skip this section entirely:
-`onesystem install` takes the CUDA path and needs no ROCm.
+| Variable | Default | Use |
+| --- | --- | --- |
+| `ONESYSTEM_MODEL` | `laya` | Set to `julia` to install julia. |
+| `ONESYSTEM_DIR` | `~/.local/share/onesystem/repo` | Choose the checkout path for a curl install. |
 
-### 1. Clone and install
+For example, run `export ONESYSTEM_MODEL=julia`, then run the install command.
+Running `bash install.sh` from a checkout uses that checkout.
+
+### Manual install
+
+Check the [requirements](#requirements), then:
 
 ```sh
 git clone https://github.com/micahn/onesystem.git
 cd onesystem
 bun install
-```
-
-### 2. Config
-
-```sh
 mkdir -p ~/.config/onesystem
-cp onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
-```
-
-That file is a **template, not a working config.** Every path in it is a placeholder,
-because the real ones depend on your interpreter and your weights directory and cannot be
-written down in a repository. Step 3 fills them in.
-
-### 3. Install the model
-
-```sh
+cp -n onesystem.config.jsonc ~/.config/onesystem/onesystem.jsonc
 bun run src/cli.ts install laya
-```
-
-This builds a Python environment onesystem owns, verifies it can see your GPU, points the
-config at it, and enables it. There is nothing to copy and nothing to paste. It takes a few
-minutes the first time, most of it downloading ROCm torch.
-
-```
-installed laya
-  interpreter: /home/you/.local/share/onesystem/runtimes/laya/.venv/bin/python
-
-configured /home/you/.config/onesystem/onesystem.jsonc
-  enabled: laya
-
-Run `onesystem start` and make a tool call. Nothing else to do.
-```
-
-`--no-config` prints the block instead of writing it. A second model is `install julia`.
-Note that enabling one model disables the others, and the command tells you which.
-
-### 4. Register the plugin
-
-```sh
 bun run src/cli.ts register-plugin
-```
-
-That writes one file, `~/.config/opencode/plugins/onesystem.ts`:
-
-```ts
-export { default } from "/absolute/path/to/onesystem/src/plugin/index.ts"
-```
-
-opencode V2 autodiscovers every `.ts` and `.js` file in that directory, so placing the plugin
-there is the whole of registration. The file is a re-export rather than a copy, for two
-reasons. Autodetection does not follow symlinks, so a symlink is not available. And a copy is
-wrong: the plugin imports `../health.ts` and friends and finds its own CLI at `../cli.ts`, so a
-copy of `src/plugin/` alone would not resolve, and a copy of the whole tree would be a second,
-silently stale copy of the code the plugin actually runs. A re-export always reads the
-checkout, so `git pull` takes effect on the next reload.
-
-If you previously registered through the `plugins` array in `opencode.json`, this removes
-that entry, since otherwise the same plugin loads twice. It is still a `jsonc-parser` edit
-rather than a `sed`: `opencode.json` is hand-edited JSONC, and a `JSON.parse` round trip would
-delete every comment in it.
-
-Check what opencode thinks it loaded:
-
-```sh
-opencode plugin list
-```
-
-One `onesystem` row pointing at the generated file is the answer you want.
-
-If you came from the old per-session setup, delete any `laya-mcp` entry from the `mcp.servers`
-block in `opencode.json`. As long as it is configured, every session keeps its own laya process
-and its own copy of the checkpoint, which is the entire problem this project exists to solve.
-The plugin registers `laya` itself, over HTTP, sharing one daemon.
-
-The plugin needs no options. It derives the CLI path from its own location, so it works from a
-checkout with nothing on `PATH`.
-
-**Restart opencode after this.** Plugins load at server startup, so a session that is already
-open will not see the tools.
-
-### 5. Check it
-
-```sh
 bun run src/cli.ts start
 bun run src/cli.ts status
 ```
 
-`status` loads nothing, so it is safe to run before the first tool call. The backends should
-read `cold`. The first tool call pays a 10-14 s cold load; a warm one is tens of ms.
+Use `install julia` for julia. Add `--no-config` to print the config block instead
+of writing it, or `--lock-only` to resolve dependencies without installing the runtime.
+Backends should show `cold` until the first call.
 
-There is no `onesystem` on `PATH` in a fresh checkout. The plugin finds the CLI from its own
-location, so that works; use `bun run src/cli.ts <command>` as above.
+Registration writes `~/.config/opencode/plugins/onesystem.ts`, which re-exports the
+plugin from this checkout. Keep the checkout at that path. Updates take effect when
+OpenCode reloads the plugin. Registration also removes the old `plugins` array entry
+from `opencode.json` to prevent duplicate loading.
 
-## Use
+Restart OpenCode and check `opencode plugin list`.
+
+### Existing laya setup
+
+Remove the old local `laya-mcp` entry from `mcp.servers` in `opencode.json`.
+Otherwise, sessions still start separate laya processes alongside the shared daemon.
+
+## Development
 
 ```sh
-onesystem start     # start the daemon if it is not already up (race-safe)
-onesystem status    # what is running; loads nothing
-onesystem stop      # stop it now
-onesystem serve     # run in the foreground
+bun test
+bun run typecheck
 ```
 
-And the model commands, which read no config and so work even when the config is what is
-broken:
+Tests use fake backends and need no GPU. For an AMD/ROCm check, install the laya
+runtime and run `./test/e2e-laya.sh`. It stops and starts the daemon on port 7331,
+so run it when no active session needs the service.
 
-```sh
-onesystem runtimes            # which runtimes are installed
-onesystem doctor [model]      # check one against the GPU it will run on
-onesystem install <model>     # build a runtime onesystem owns
-onesystem use <model>         # switch which backend is enabled
-onesystem uninstall <model>
-onesystem config-path
-```
+### Measured performance
 
-Logs go to `~/.local/state/onesystem/daemon.log`.
+AMD RX 9070 XT (gfx1201), ROCm 6.4 driver, ROCm 7.2 PyTorch wheel, laya 0.3.21:
 
-## Configuration
-
-`~/.config/onesystem/onesystem.jsonc`. A `.json` name there still works, but `.jsonc` is
-what the docs and `onesystem config-path` use: the file carries comments, and a `.json`
-extension makes every editor and linter report those lines as errors. See
-`onesystem.config.jsonc` for the annotated version.
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `host` | `127.0.0.1` | Loopback only. Do not change without adding auth. |
-| `port` | `7331` | |
-| `idleShutdownSecs` | `600` | Wind down after this long with no traffic. |
-| `idleSweepSecs` | `5` | How often the idle check runs. |
-| `requestTimeoutSecs` | `120` | Ceiling on one forwarded call. |
-| `backends` | `{}` | See below. |
-
-### The declared tool surface
-
-Every `stdio-mcp` backend needs a `tools` list naming the tools it exposes, without its
-product prefix. This is the one place a model's surface is written down by hand:
-
-```jsonc
-"laya": {
-  "transport": "stdio-mcp",
-  "command": ["/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/laya-mcp-server"],
-  "toolPrefix": "laya_",
-  "tools": ["predict", "status", "route", "decide"]
-}
-```
-
-It is declared because it cannot be discovered. Reading the tool list means forwarding
-`tools/list` to the process, and that is the 20-54s load and 3 GB of VRAM that lazy start
-exists to keep off session start — so a session that discovered its own tools would load
-every model before the agent asked anything. The daemon serves the declared list from
-`/catalog` without touching a process.
-
-The trade is real: if a model adds or renames a tool, the list needs a matching edit. A
-name the process does not answer fails the call with the backend's own "unknown tool",
-which is loud at the moment of the call — the preferable failure to a session start that
-quietly costs three gigabytes. After a first call, `onesystem status` shows what the
-model actually publishes.
-
-### Naming
-
-The MCP server is registered as `onesystem`, and each backend's `toolPrefix` is stripped
-from its tool names, so laya's `laya_predict` is presented as `onesystem.predict`. The
-rename happens in both directions: stripped on the way out to opencode, restored on the
-way in to the process. Doing it in one direction only would advertise a name the backend
-cannot answer to.
-
-`toolPrefix` is explicit rather than inferred. The daemon has no way to know that a
-backend happens to prefix its tools with its own product name, and a wrong guess would
-silently rename every tool.
-
-With one backend enabled the server is named `onesystem`. With several, they become
-`onesystem-<backend>` so two backends cannot claim the same name; set `serverName`
-explicitly to override.
-
-### Backends
-
-Two transports, because the System 1 landscape does not agree on one.
-
-**`stdio-mcp`** — a local process speaking MCP over stdio. onesystem owns the process.
-This is `laya`.
-
-```jsonc
-"laya": {
-  "transport": "stdio-mcp",
-  "command": ["/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/laya-mcp-server"],
-  "env": { "LAYA_DEVICE": "cuda", "LAYA_PRELOAD": "0", "LAYA_PYTHON": "/path/to/venv/bin/python" },
-  "startupTimeoutSecs": 180
-}
-```
-
-`onesystem install laya` writes that block for you. Two of those values are load-bearing:
-
-> **`LAYA_PRELOAD: "0"`** makes laya load a checkpoint on first use rather than at startup.
-> Without it a model sits in VRAM from the moment the process starts, which is the whole
-> thing lazy start exists to avoid.
-
-> **`LAYA_PYTHON`** goes in the config, not your shell, because the daemon inherits nothing
-> from the session that started it. The venv's own `laya-mcp-server` finds its interpreter
-> from its shebang, so this only matters for a backend whose `command` is not that binary.
-
-**`systemone-http`** — an already-running service speaking `POST /v1/systemone`, the spec
-behind TypeSafe's `typesafe-sdk` and implemented by `rev`. onesystem does not start these.
-
-```jsonc
-"rev": { "transport": "systemone-http", "baseUrl": "http://127.0.0.1:8000" }
-```
-
-Adding a model is a config entry, not a code change. As of September 2026 the open
-System 1 field includes `laya`, `rev`, `foq`, `rush-one`, `system1`, and
-`FastDecider-149M`, with `Jev` as the closed commercial equivalent. Anything speaking
-`/v1/systemone` drops in as an HTTP backend; anything speaking MCP over stdio drops in as
-a process backend.
-
-> The `systemone-http` adapter deliberately exposes one pass-through `systemone` tool
-> rather than a typed `predict`. The exact `/v1/systemone` schema is not verified against
-> a live service here, and inventing field names that silently do nothing would be worse
-> than an honest pass-through. Replace `forward()` with a typed adapter once there is a
-> real service to read the schema from; the transport and lifecycle do not change.
-
-## Lifecycle
-
-| Event | What happens |
+| Operation | Time or memory |
 | --- | --- |
-| Plugin loads | `onesystem start`, then register remote MCP servers. No model. |
-| First `tools/call` | Backend spawns. Costs 10-54s and ~3 GB VRAM. |
-| Idle for `idleShutdownSecs` | Backend stops; when nothing is warm the daemon exits. |
-| Next `tools/call` after that | Plugin notices nothing is listening and restarts the daemon first. |
-| Session closes | Registration dropped. **Daemon left running** — see below. |
-| Catalog changes | opencode caches tool names per session, so a rename needs a session restart. |
-| `onesystem stop` | Everything stops now. |
+| Install laya, warm uv cache | ~10 s |
+| Install julia, including 585 MB of weights | ~46 s |
+| Start daemon, no model loaded | ~190 ms |
+| First tool call | laya ~13.7 s; julia ~15.7 s |
+| Warm tool call | Tens of milliseconds |
+| Both models loaded | 6.6 GB VRAM |
 
-A session closing does not stop the daemon. Sessions close independently, so one closing
-must not pull the model out from under the others. The idle window is what ends it, and
-`onesystem stop` is there for when you want it gone immediately.
-
-A session routinely outlives the idle window, and opencode holds no handle on the daemon
-process — the tools stay in the session catalog, so the agent keeps calling them against a
-port nothing is listening on. So the plugin hooks `tool.execute.before`: a call to one of
-its own servers probes `/health` first, and starts the daemon if nothing answers. The call
-pays about a second of startup rather than failing, and the session's MCP client is
-reloaded so it drops the session id of the daemon that exited. Deliberately not a poll: a
-timer would either hold the daemon open forever or sit on an interval long enough to be
-the same bug. The GPU is still released the moment the window closes; only the process
-comes back, and it comes back cold.
-
-## Timeouts
-
-There is one request budget, `requestTimeoutSecs`, enforced by the supervisor on the
-daemon side and passed down to the adapter so it can hand the same number to a library
-that wants one. opencode's MCP startup timeout does not apply: the plugin registers
-tools natively rather than as remote MCP servers, so nothing is negotiated at connect
-time and no host timeout has to be extended to cover a cold load.
-
-`GET /catalog` — the one call the plugin makes at setup — loads nothing and is bounded
-inside the plugin, so a daemon that accepts a connection and then stops answering cannot
-hold session start open.
-
-## Tests
-
-```sh
-bun test              # 315 unit and integration tests
-./test/e2e-laya.sh    # end to end against the real laya backend
-```
-
-`bun test` is self-contained: the backend tests run against fake MCP processes in
-`test/fixtures/`, so they need no GPU and no model. `e2e-laya.sh` is the opposite. It wants
-a real AMD or NVIDIA card and a `laya` runtime from `onesystem install laya`. It also stops
-and starts the daemon on port 7331, so do not run it against a session you are using.
-
-The tests worth knowing about:
-
-- **`lock.test.ts`** fires 25 concurrent acquires and asserts exactly one wins. This
-  caught a real bug: `open(path, "wx")` creates the file *empty*, and a loser reading it
-  inside that window saw no pid, called it stale, and deleted it. Two daemons, one lock.
-  Fixed with a grace window that treats an unreadable record as a create in flight.
-- **`lazy.test.ts`** starts a real daemon against a real MCP child and watches a marker
-  file the child writes on spawn. This is what pins "nothing loads until the first
-  request", and it pins it twice over: once for `GET /catalog` and once for the whole
-  plugin setup path, which are the two things that used to spawn a model before the agent
-  had asked anything. It also caught a second real bug: `#everWarm` was set while reading
-  backend state *before* the forward, where a first request always looks cold, so a
-  service that only ever saw one request never shut down.
-- **`e2e-laya.sh`** asserts `device: cuda` explicitly. Asserting on timing is not enough;
-  an early version passed while every call was failing, because the shim had died on a
-  missing `LAYA_PYTHON` and the bridge returned error payloads quickly.
-
-## Measured
-
-On this machine (AMD RX 9070 XT, gfx1201, ROCm 6.4 driver with the ROCm 7.2 torch wheel,
-`laya` 0.3.21). Taken from the clean-room install above, not from an already-warm setup.
-
-| | |
-| --- | --- |
-| `onesystem install laya`, cold uv cache | several minutes, mostly ROCm torch |
-| `onesystem install laya`, warm uv cache | ~10 s |
-| `onesystem install julia` incl. 585 MB of weights | ~46 s |
-| `onesystem start` → healthy, no model loaded | ~190 ms |
-| First `tools/call` (cold, includes the load) | laya ~13.7 s, julia ~15.7 s |
-| Warm `tools/call` | tens of ms |
-| VRAM, both models resident | 6.6 GB |
-| `onesystem install laya --lock-only` | resolves and downloads nothing |
-
-The cold figure is the one to expect on the first tool call of a session, and it is
-dominated by `import transformers` rather than by inference.
-
-## Layout
-
-```
-install.sh            the one-command installer; the steps below are what it does
-src/
-  cli.ts                serve | start | stop | status | install | use | register-plugin | doctor
-  daemon.ts             lock + bind + supervise + wind down
-  lock.ts               single-instance guard
-  http.ts               MCP Streamable HTTP front
-  health.ts             what GET /health means, and how to read it
-  supervisor.ts         lazy start, request accounting, idle shutdown
-  config.ts             JSONC config, validation
-  config-edit.ts        editing that config without destroying the comments
-  routing.ts            which model answers when the agent has not said
-  naming.ts             what a backend and its tools are called
-  models.ts             the models onesystem knows how to install
-
-  paths.ts              where things live on disk
-  subprocess.ts         the project's one subprocess seam
-  async.ts              deadlines and error description, shared by everything that waits
-  log.ts                structured logging
-  version.ts
-  backend/
-    spec.ts             what a backend is, as declared in config
-    types.ts            the Backend contract, and the port the daemon depends on
-    stdio-mcp.ts        spawn + forward to a local MCP process
-    systemone-http.ts   POST /v1/systemone
-    usage.ts            per-backend call accounting
-  plugin/
-    index.ts            the opencode V2 plugin
-    discover.ts         finding the daemon, from either entrypoint
-    tools.ts            registering the models as native tools
-    tui.ts              the status line, and a way to fix what it says
-  shims/
-    julia-mcp.py        MCP bridge for julia, which ships a library and no server
-```
+Cold calls spend most of their time importing `transformers`.

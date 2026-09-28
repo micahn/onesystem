@@ -1,10 +1,6 @@
 /**
- * Registering the plugin with opencode, which autodiscovers it from a directory.
- *
- * opencode V2 loads every `.ts` and `.js` file in `~/.config/opencode/plugins/`, so
- * registering means writing one line there. What these tests pin is the part that is easy to
- * get wrong: that the file is a re-export of the checkout rather than a copy of it, and that
- * a copy is not an option here at all.
+ * Registration must re-export the checkout from OpenCode's plugins directory.
+ * A source copy would break relative imports or become stale after updates.
  */
 
 import { describe, expect, test } from "bun:test"

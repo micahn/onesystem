@@ -1,24 +1,7 @@
 /**
- * `POST /v1/systemone` backend.
- *
- * The second transport, and the reason the config has a `backends` map instead of a
- * single hardcoded laya command. `rev` publishes this spec, and so does TypeSafe's
- * `typesafe-sdk`, so anything implementing it is a drop-in peer of laya even though it
- * is a completely different process model: laya needs onesystem to own a local
- * process, `rev` is already a server someone else started.
- *
- * onesystem therefore does not start these. It only calls them, and a failure to reach
- * one is reported as a failed forward rather than a failed start.
- *
- * ## What is deliberately not here
- *
- * A typed `predict` tool mirroring laya's `state` + `questions` shape. It would be
- * guesswork: the exact `/v1/systemone` request and response schema is not verified
- * against a live service here, and inventing field names that silently do nothing is
- * worse than an honest pass-through. So this exposes one `systemone` tool that takes
- * the request body verbatim and returns the response verbatim. Once a real service is
- * running, replace `call()` with a typed adapter and the tool surface gets proper
- * schemas. The transport, lifecycle, and HTTP fronting stay exactly as they are.
+ * Forward a systemone tool to an existing POST /v1/systemone service.
+ * The service owns its lifecycle. Bodies pass through because the exact schema
+ * has not been verified against a live service; add types after verifying it.
  */
 
 import type { SystemOneBackend } from "../config.ts"
@@ -34,9 +17,7 @@ export type FetchLike = (input: string, init: RequestInit) => Promise<Response>
 export class SystemOneBackendImpl implements Backend {
   readonly transport = "systemone-http" as const
   /**
-   * Nothing local to release, so the idle sweep must not count this backend. Stated here
-   * rather than inferred from the transport at four call sites: "is this ours to stop" is
-   * a fact about the adapter, not a pattern match the supervisor repeats.
+   * No owned process; exclude this backend from local idle shutdown.
    */
   readonly local = false
 
@@ -44,9 +25,7 @@ export class SystemOneBackendImpl implements Backend {
   #state: BackendState = "warm"
   #reachable: boolean | null = null
   /**
-   * The per-call ceremony, in one place, for the same reason the local adapter has one:
-   * `inflight` above zero makes the idle sweep skip this backend forever, and the release
-   * that brings it back down has to exist in exactly one place. See `CallLedger`.
+   * Use the same call accounting as the local adapter.
    */
   #ledger: CallLedger
 
@@ -71,12 +50,7 @@ export class SystemOneBackendImpl implements Backend {
   }
 
   /**
-   * Read off the same list the adapter answers `tools/list` with.
-   *
-   * This transport needs no declared list in config, because it has no child process to
-   * start: the surface is a constant right here. Deriving from `systemoneToolList` rather
-   * than repeating the name keeps the two from drifting, which is the one thing a tool
-   * surface must not do — a catalog advertising a name `call` will refuse.
+   * Share tools/list's local declaration; no config list or network request is needed.
    */
   get tools(): readonly string[] {
     const list = systemoneToolList() as { tools?: { name?: unknown }[] }
@@ -85,30 +59,17 @@ export class SystemOneBackendImpl implements Backend {
       .filter((name): name is string => typeof name === "string")
   }
 
-  /** No-op, and not merely because it is cheap: there is no process to own. */
+  /** Mark activity without starting a process. */
   async start(): Promise<void> {
-    // Not a call, so it gets no duration and no `inflight` — but it is activity, and an
-    // `idleMs` still counting from before a start would report a backend as due for
-    // release the moment it came up.
     this.#ledger.touch()
   }
 
   async quiesce(): Promise<void> {
-    // Nothing local to release. The supervisor still counts this backend as warm, so it
-    // is exempt from the idle sweep; see BackendStatus#local.
+    // The external service owns its lifecycle; there is nothing local to release.
   }
 
   async call(ctx: CallContext): Promise<unknown> {
-    // The tool surface is this adapter's own business, so it is answered here rather than
-    // in the supervisor: special-casing it one layer up meant the request path had a branch
-    // that only applied to one transport, and a third transport would have needed a fourth
-    // edit in a module with no reason to know any of them.
-    //
-    // All of it is above the tracked region, and that is a change of behaviour worth naming.
-    // `tools/list` and a rejected method or unknown tool never reach the model, so counting
-    // them as calls gave them a duration and an error count for work that did not happen.
-    // The local model already behaved this way — its `call` rejected an unsupported method
-    // before `inflight++` — so this is the http adapter being made to match, not a new rule.
+    // Local catalog reads and rejected methods do not count as model calls.
     if (ctx.method === "tools/list") return systemoneToolList()
     if (ctx.method !== "tools/call") {
       throw new BackendError(this.name, `method not supported by the systemone adapter: ${ctx.method}`)
@@ -130,18 +91,12 @@ export class SystemOneBackendImpl implements Backend {
 
   async #forward(ctx: CallContext, body: unknown): Promise<unknown> {
     const url = `${this.spec.baseUrl}/v1/systemone`
-    // Same shape as the local adapter's, and for the same reason: `validate` always
-    // populates `startupTimeoutSecs`, so the `30` is a last-resort default for a hand-built
-    // spec rather than a value the shipped config can ever produce. `ctx.timeoutMs` is the
-    // caller's budget and wins over both.
+    // Prefer the caller's budget. The fallback supports specs built without validate.
     const timeoutMs = ctx.timeoutMs ?? (this.spec.startupTimeoutSecs ?? 30) * 1000
     const doFetch = this.deps.fetch ?? ((input, init) => fetch(input, init))
     const body_text = JSON.stringify(body ?? {})
 
-    // The deadline and the caller's signal both have to reach fetch, and they are two
-    // separate aborts. The old code took `ctx.signal ?? controller.signal`, which meant
-    // that supplying a caller signal silently discarded the timeout — a branch that
-    // read as a merge and behaved as a replacement.
+    // Either the deadline or caller cancellation must abort fetch.
     const deadline = startDeadline(timeoutMs)
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline.signal]) : deadline.signal
 
@@ -173,15 +128,6 @@ export class SystemOneBackendImpl implements Backend {
     }
   }
 
-  /**
-   * The read-only view, and only the read-only view.
-   *
-   * This widened the return type with `& { baseUrl; reachable }`, and nothing read either:
-   * `baseUrl` is in the config the adapter was built from, and `reachable` is a private
-   * field set on the request path. `reachable` is still tracked — it is what tells a
-   * future reader whether the failure above was the model or the network — it is just no
-   * longer published on a read that structurally nobody could use.
-   */
   describe(): BackendStatus {
     return {
       name: this.name,
@@ -202,10 +148,8 @@ export function systemoneToolList(): unknown {
       {
         name: "systemone",
         description:
-          "Verbatim pass-through to POST {baseUrl}/v1/systemone. Send the request body this " +
-          "service documents; the response is returned unchanged. No schema is imposed here " +
-          "on purpose, because the /v1/systemone schema is not yet verified against a live " +
-          "service.",
+          "Send the service's documented request body to POST {baseUrl}/v1/systemone. " +
+          "Returns the response unchanged. The schema has not been verified against a live service.",
         inputSchema: { type: "object", additionalProperties: true },
       },
     ],

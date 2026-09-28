@@ -1,58 +1,14 @@
 /**
- * HTTP front: MCP Streamable HTTP in, backend traffic out.
- *
- * The route table is deliberately small:
- *
- *   GET  /health          status, loads nothing, used by the plugin to decide whether
- *                         to start a daemon
- *   POST /mcp/:backend    JSON-RPC, the real endpoint
- *   GET  /mcp/:backend    SSE stream for server-initiated notifications
+ * HTTP API over BackendRoutes:
+ *   GET /health           status without loading models
+ *   GET /catalog          declared tools without starting backends
+ *   POST /call            native plugin tool calls
+ *   POST /mcp/:backend    MCP JSON-RPC for other clients
+ *   GET /mcp/:backend     MCP SSE notifications
  *   DELETE /mcp/:backend  end an MCP session
  *
- * One endpoint per backend rather than one multiplexed endpoint, because opencode
- * registers one MCP server per URL and that is also what keeps tool names namespaced:
- * tools from `laya` stay `laya_predict` and cannot collide with a later `rev` backend
- * exposing its own.
- *
- * Built on `node:http` rather than Bun's native `Bun.serve` so the MCP SDK's
- * `StreamableHTTPServerTransport` can be handed the request and response directly. Bun
- * runs `node:http` natively, so this costs nothing and avoids reimplementing session
- * handling, SSE framing, and protocol negotiation.
- *
- * ## The timeout that matters
- *
- * A client's first `initialize` against a cold backend pays the model load, measured at
- * 20-54s here, on top of the backend's own import. opencode's default `mcp.timeout.startup`
- * is 30s, so a cold remote server looks like a startup failure. The plugin raises that
- * timeout when it registers the server; this side just has to not give up first.
- *
- * ## What this module depends on
- *
- * `BackendRoutes`, which is four methods — not the supervisor. Everything else about a
- * backend (how it starts, when it may be stopped, what transport it speaks) is behind
- * that slice, so routing can be tested against a port that is not a supervisor. The
- * previous signature took the concrete `Supervisor` class, which meant the one module
- * that had a real seam never exposed it and every routing test needed a live child
- * process.
- *
- * ## Two front doors, on purpose
- *
- * The JSON endpoints (`/catalog`, `/call`) and the MCP endpoint (`/mcp/:backend`) are the
- * same daemon. They exist because the two have different readers:
- *
- *   - opencode talks to `/catalog` and `/call`, because the plugin can register a tool
- *     directly. Going through MCP to reach a tool opencode can already host natively costs
- *     a protocol layer and puts a server in the user's sidebar per backend, which is
- *     exactly the clutter worth removing.
- *   - Anything else — a script, a benchmark harness, a different client — talks MCP,
- *     which is the interchange format for this class of model and the one laya itself
- *     speaks.
- *
- * The schemas are not read from the model. The MCP route forwards `tools/list` and so
- * does publish what the model actually exposes — but reaching it costs a process start,
- * and `/catalog` must answer before anything is loaded, so that surface is declared in
- * config and served from there. A model that changes its surface needs a config edit, and
- * the call-time schema check is what catches it having not been made.
+ * node:http supplies the request/response objects the MCP SDK needs.
+ * MCP tools/list reaches the backend and can start it; /catalog must remain local.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
@@ -81,11 +37,7 @@ const log = logger("http")
 const MAX_BODY_BYTES = 8 * 1024 * 1024
 
 /**
- * The slice of the backend port this module needs.
- *
- * Declared as a `Pick` rather than its own interface so it cannot drift from the real
- * one. Narrower than the full port on purpose: a test for routing should not have to
- * implement the idle watch to satisfy a type it does not use.
+ * Only the BackendPort methods HTTP uses. Pick keeps their types in sync.
  */
 export type BackendRoutes = Pick<
   import("./backend/types.ts").BackendPort,
@@ -103,11 +55,7 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
   /** MCP session id -> its transport. The transport owns the Server it is paired with. */
   const sessions = new Map<string, StreamableHTTPServerTransport>()
   /**
-   * The signal of the request currently being handled, per transport.
-   *
-   * A WeakMap rather than one variable, because two sessions can be mid-call at once and
-   * a shared variable would hand one session's disconnect to the other session's model
-   * call. Keyed on the transport so the lifetime is exactly the session's.
+    * Current request signal per transport so concurrent sessions do not share cancellation.
    */
   const inFlight = new WeakMap<StreamableHTTPServerTransport, AbortSignal | undefined>()
 
@@ -130,9 +78,7 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
         params.name = prefix + params.name
       }
 
-      // The client's disconnect rides through, so a caller that gives up does not leave a
-      // model call running. It used to be dropped here: the interface declared a signal,
-      // the supervisor forwarded it, and this line called `call` with three arguments.
+      // Forward disconnects so abandoned calls can release backend resources.
       const result = (await backends.call(backendName, method, params, inFlight.get(transport))) ?? {}
 
       // And strip it again on the way out, so the catalog opencode caches reads
@@ -156,9 +102,7 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     server.setRequestHandler(GetPromptRequestSchema, forward("prompts/get") as never)
     server.setRequestHandler(ListResourcesRequestSchema, forward("resources/list") as never)
     server.setRequestHandler(ReadResourceRequestSchema, forward("resources/read") as never)
-    // Advertising the `resources` capability makes opencode ask for templates on every
-    // connect. Without this handler it logs "Method not found" once per session per
-    // reconnect, which is pure noise from a capability we advertised and did not serve.
+    // The advertised resources capability includes template listing.
     server.setRequestHandler(
       ListResourceTemplatesRequestSchema,
       forward("resources/templates/list") as never,
@@ -225,19 +169,8 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     }
 
     if (url.pathname === "/catalog" && req.method === "GET") {
-      // The tool surface, per backend — read, never forwarded.
-      //
-      // This endpoint used to call `tools/list` on every backend through the supervisor,
-      // which cold-starts a process, so the opencode plugin's `setup` was a `Promise.all`
-      // of 20-54s model loads paid before the agent had asked anything. That is the exact
-      // cost the lazy-start contract exists to keep off that path, and the plugin's own
-      // header comment claimed the opposite of what its call chain did. The surface now
-      // comes from each backend's declared `tools`, which reads no process at all.
-      //
-      // Names are reported *prefixed* even though the declaration is bare, so the plugin's
-      // existing strip-on-the-way-out logic still produces the name opencode registers, and
-      // a `/call` still carries the wire name the backend answers to. The prefix stays
-      // authoritative in exactly one place: the backend that owns it.
+      // Read declared tools without calling a backend. Include wire prefixes for
+      // /call; the plugin strips them only from displayed names.
       const backendsOut = backends.names().map((name) => {
         const backend = backends.get(name)
         const prefix = backend.toolPrefix ?? ""
@@ -247,10 +180,7 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
           tools: {
             tools: backend.tools.map((tool) => ({
               name: prefix + tool,
-              // A pass-through on purpose. The model publishes its own schema over MCP and
-              // inventing field names here would be a second, silent description of it —
-              // worse than an honest envelope. `tools/call` forwards the arguments
-              // verbatim, so the model's real schema is what validates them.
+              // Accept an object here; the backend validates its own argument schema.
               description:
                 `${name} ${tool}. Forwards its arguments to ${name} unchanged; see the ` +
                 `backend's own tools/list for the authoritative schema.`,
@@ -354,13 +284,8 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
 }
 
 /**
- * A signal that fires when the client goes away mid-request.
- *
- * Not `req.signal`, which is the obvious choice and is wrong here. A request's own signal
- * aborts when the *request* is done — and a POST with a body is done the moment we have
- * read it, which is before the handler runs. Wiring that through aborted every single
- * tool call. What we want is the client hanging up before the response finished, which
- * lives on the response: `close` with nothing written means the peer went away.
+ * Abort when the client disconnects before the response ends. Reading the full
+ * POST body is normal and must not cancel the backend call that follows.
  */
 function clientDisconnect(req: IncomingMessage, res: ServerResponse): { signal: AbortSignal; dispose(): void } {
   const controller = new AbortController()
@@ -380,10 +305,7 @@ function clientDisconnect(req: IncomingMessage, res: ServerResponse): { signal: 
 }
 
 /**
- * A request error that already knows its status.
- *
- * `readJsonBody` used to attach `{status: 400}` and the one catch site ignored it and
- * wrote 500 for everything, so every malformed body came back as `internal_error`.
+ * Preserve valid HTTP error statuses; use 500 for other errors.
  */
 function httpStatus(err: unknown): number {
   const status = (err as { status?: unknown } | null)?.status

@@ -1,44 +1,9 @@
 /**
- * Single-instance guard.
- *
- * The failure this exists to prevent is specific and has already happened on this
- * machine: several opencode sessions each load a plugin, each decides to "make sure
- * the service is up", and two of them start a daemon. Two daemons means two copies of
- * the same model on one GPU, which is the situation this whole project replaces.
- *
- * A check-then-act ("is it running? no? start it") is not enough, because every
- * session runs that check concurrently at startup. The mutual exclusion has to live
- * in the filesystem, where the kernel arbitrates it.
- *
- * Two layers, deliberately:
- *
- *   1. `O_CREAT|O_EXCL` on the lock file. Atomic on any POSIX filesystem, so exactly
- *      one process creates it and the losers learn they lost. This is the real guard.
- *   2. The TCP port bind. If the lock file is somehow lost, deleted by a tmp reaper, or
- *      restored from a backup, only one process can still own the port, so the second
- *      daemon fails loudly at startup instead of silently duplicating the model.
- *
- * Layer 1 alone would be defeated by a stale file after a hard kill (SIGKILL leaves no
- * cleanup handler), so `acquire` reads the recorded pid and steals the lock when that
- * pid is provably gone.
- *
- * Stealing is only safe because the holder's port is also checked. A dead pid with a live
- * listener means the daemon is serving under a pid we cannot see, and reclaiming on the
- * strength of the pid alone is exactly how two daemons end up sharing a GPU.
- *
- * That check was documented here and implemented nowhere for a long time, and when it was
- * implemented it worked for exactly one configuration. The record is written before the
- * listener binds — it has to be, since the lock is what stops two daemons racing for the
- * port — so it held the port the daemon *intended* to use. `port: 0` means "let the kernel
- * pick", so such a record held a zero: `servingOn(0)` connects nowhere, returns false, and
- * the steal proceeded on the pid alone, silently, in the one configuration the project
- * itself prefers. `Lease#record` closes that, so the value is the bound port rather than
- * the requested one.
- *
- * The same principle the grace window above establishes — "we cannot tell" is not "it is
- * gone" — is why an unreadable port skips the check rather than failing it. A record we
- * cannot read is a lock we do not understand, and refusing to reclaim those would wedge the
- * daemon behind a lock file nobody can clear.
+ * Single-instance guard using atomic O_CREAT|O_EXCL. The TCP bind is a second guard
+ * if the lock file is lost. Reclaim dead-pid records only when their recorded port
+ * is not listening; records without a readable port skip that check.
+ * Allow a grace period for incomplete writes. Lease.record stores the actual bound
+ * port after startup, including when the daemon requested port 0.
  */
 
 import { open, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
@@ -61,9 +26,7 @@ export interface Holder {
   /** True when a pid is recorded and alive, or the record is not yet readable. */
   alive: boolean
   /**
-   * Port the holder is serving on, from the record. `null` for a lock written by an
-   * older version, or one whose record could not be read — in which case the port check
-   * is skipped and only the pid is trusted.
+   * Recorded port. Null for legacy or unreadable records; skips the port check.
    */
   port: number | null
   /** Path to the lock file. */
@@ -71,33 +34,15 @@ export interface Holder {
 }
 
 /**
- * How long an unreadable lock file is presumed to be mid-create.
- *
- * `open(path, "wx")` creates the file empty, and the pid is written a moment later.
- * A concurrent reader that opens it inside that window sees zero bytes. Treating that
- * as stale is a real bug, not a theoretical one: the reader deletes the file, creates
- * its own, and two daemons hold "the" lock. So an unreadable record is presumed to be
- * a create in progress until it has sat unparseable for longer than any create window
- * could plausibly last. A create that genuinely wedged is reclaimed after this.
+ * Grace period for unreadable records. open(path, "wx") creates an empty file
+ * before the pid is written; reclaiming it immediately could admit two daemons.
  */
 const UNKNOWN_GRACE_MS = 3_000
 
 export interface Lease {
   path: string
   /**
-   * Record the port actually bound, now it is known.
-   *
-   * The record is written at acquire time, which is *before* the listener binds — and it
-   * has to be, because the lock is what stops two daemons racing for the port at all. So
-   * the value written then is the port the daemon intends to use, which is not necessarily
-   * the one it got: `port: 0` means "let the kernel pick", and every test in this repo uses
-   * it. A lock holding `0` can never be checked, so `servingOn(0)` connects to a meaningless
-   * port, returns false, and the steal proceeds on the pid alone — turning off the exact
-   * check the steal is only safe because of.
-   *
-   * So the caller reports the real port back once the listener is up. After that the
-   * recorded port is a fact rather than an intention, and the steal check works for a
-   * daemon that asked the kernel for a port as well as one that named it.
+   * Record the actual port after binding. A requested port of 0 cannot be probed.
    */
   record(port: number): Promise<void>
   release(): Promise<void>
@@ -115,7 +60,7 @@ export class LockBusy extends Error {
   }
 }
 
-/** True when a pid exists and we may signal it. EPERM means it exists but is not ours. */
+/** True when the pid exists, including when signaling it returns EPERM. */
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -127,10 +72,7 @@ export function pidAlive(pid: number): boolean {
 }
 
 /**
- * Is something listening on a loopback port?
- *
- * A connect, not a bind: binding would itself be a lock, and would race with the daemon
- * we are trying to detect. A refused connection is the answer we want, and it is fast.
+ * Probe by connecting; binding would compete with the daemon for its port.
  */
 function servingOn(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
@@ -186,13 +128,7 @@ async function readHolder(path: string): Promise<Holder> {
   return { pid, state: alive ? "held" : "stale", alive, port, path }
 }
 
-/**
- * Take the lock, or report who holds it.
- *
- * Retries the steal path a few times: if we read a lock whose pid is dead, another
- * process is very likely doing the same read at the same moment, and exactly one of
- * us should win the recreate.
- */
+/** Acquire or report the holder. Retry when processes race to reclaim a stale lock. */
 export async function acquire(path: string, info: Record<string, unknown> = {}): Promise<Lease> {
   await mkdir(dirname(path), { recursive: true })
 
@@ -222,9 +158,7 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
           if (released) return
           try {
             const current = await readHolder(path)
-            // Only rewrite our own record. A successor that already reclaimed the lock owns
-            // that file now, and overwriting it with our pid would strand their guard and
-            // leave a lock nobody can ever take.
+            // Preserve a successor's record if ownership changed.
             if (current.pid !== process.pid) return
             extra = { ...extra, port }
             await writeFile(path, JSON.stringify({ pid: process.pid, startedAt, ...extra }))
@@ -263,11 +197,8 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
         continue
       }
 
-      // A dead pid is not sufficient grounds on its own. If the recorded port still
-      // answers, the daemon is serving under a pid we cannot see, and taking the lock
-      // would start a second daemon against a GPU the first one is holding. This is the
-      // check the module header has always claimed; it needs the port the record has
-      // always carried.
+      // A listening port can belong to a daemon whose pid is not visible here.
+      // Keep its lock to prevent a duplicate model process.
       if (holder.port !== null && (await servingOn(holder.port))) {
         log.warn("lock holder has a dead pid but is serving", { path, pid: holder.pid, port: holder.port })
         throw new LockBusy(holder)

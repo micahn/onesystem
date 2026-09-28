@@ -1,39 +1,6 @@
 /**
- * The config file: what a person wrote, and whether it is allowed.
- *
- * This module used to be four subjects in one namespace -- path layout, naming policy,
- * validation, and the daemon's report schema -- which is 20 exports across 438 lines and
- * the widest interface in the codebase. The friction was never the module: `validate` is
- * genuinely deep, putting ~130 lines of refusal behaviour behind one small entry point, and
- * it is the best-tested thing here. The friction was the other three subjects sharing its
- * namespace, and one of them forcing a type cycle:
- *
- *     config.ts -> health.ts -> backend/types.ts -> config.ts
- *
- * Which is a strange thing for a config file to be doing. `DaemonStatus` is a *report* type
- * and it could only live here because this was the one module already importing the other
- * three. So it moved to `health.ts`, beside the report it embeds.
- *
- * What is left is one subject, and a coherent one: the declared shape (`Config`, `DEFAULTS`),
- * `validate`, which decides what may be said, and `loadConfig`, which finds and parses a
- * file. The rest went where it belonged -- `paths.ts` for where things live on disk,
- * `naming.ts` for what a backend is called, `backend/spec.ts` for what a backend *is*
- * (importing nothing, which is what closes the cycle), and `health.ts` for what the daemon
- * reports.
- *
- * ## Two backend transports
- *
- * Because the System 1 landscape of Sept 2026 does not agree on one:
- *
- *   - `stdio-mcp` -- a local process speaking MCP over stdin/stdout. This is what
- *     `laya` is, and it is the transport that needs a real local process.
- *   - `systemone-http` -- an already-running service speaking `POST /v1/systemone`,
- *     the spec published by TypeSafe's typesafe-sdk and implemented by `rev`.
- *     onesystem does not start these; it only calls them.
- *
- * The split is the whole point of the `backends` map: adding a model is a config
- * entry, not a code change. `laya` and `rev` are interchangeable at the tool boundary
- * because both are surfaced as MCP tools.
+ * Load and validate JSONC config. Backend types live in backend/spec.ts;
+ * paths, naming rules, and status payloads have separate modules.
  */
 
 import { readFile } from "node:fs/promises"
@@ -42,10 +9,7 @@ import type { ConfiguredBackend, Transport } from "./backend/spec.ts"
 import { configCandidates } from "./paths.ts"
 import type { RoutingConfig } from "./routing.ts"
 
-// Re-exported so a caller that wants a backend's declared shape does not have to know
-// which of the four modules it ended up in. The *values* moved; these names are still the
-// obvious way to ask for the types, and keeping them here costs one line and saves a
-// rename across five adapters and a dozen tests.
+// Keep backend types available to existing config consumers.
 export type {
   BackendSpec,
   ConfiguredBackend,
@@ -56,13 +20,7 @@ export type {
 
 export interface Config {
   /**
-   * Where the daemon listens. Must resolve to loopback.
-   *
-   * This endpoint has no auth, accepts no Origin check, and will read a request body of
-   * any size — so a non-loopback bind publishes a model to the network. That was asserted
-   * in a comment here, in `http.ts`, in the plugin, and in the README, and enforced
-   * nowhere: `validate` took any string and `server.listen` bound it. `validate` now
-   * refuses one.
+   * Listen address. Validation permits only loopback because the service has no auth.
    */
   host: string
   port: number
@@ -72,24 +30,14 @@ export interface Config {
    */
   idleShutdownSecs: number
   /**
-   * Sweep interval for the idle check. Small; the check is a timestamp compare.
-   *
-   * Related to `idleShutdownSecs` by being compared against a timestamp that the sweep
-   * reads, not by needing to be smaller: a sweep coarser than the window just means the
-   * daemon exits up to one interval late, which is harmless. What must not happen is a
-   * window so short that a request which has just completed gets reaped by the very tick
-   * that first observes the backend warm — hence the check in `validate`.
+   * Seconds between idle checks. Must not exceed idleShutdownSecs.
    */
   idleSweepSecs: number
-  /** Ceiling on one forwarded MCP call. Mirrors LAYA_TOOL_TIMEOUT_SECS. */
+  /** Maximum seconds per forwarded call, enforced by the supervisor. */
   requestTimeoutSecs: number
   backends: Record<string, ConfiguredBackend>
   /**
-   * Which model answers when the agent has not said. See src/routing.ts.
-   *
-   * Optional and off unless `enabled` is true, and ignored entirely unless more than one
-   * backend is on — a routing config with a single model is not a degraded route, it is no
-   * route, and reading as active while doing nothing is worse than not existing.
+   * Optional default model and task guidance. Requires enabled: true and multiple backends.
    */
   routing?: RoutingConfig
 }
@@ -104,25 +52,10 @@ export const DEFAULTS: Config = {
   backends: {},
 }
 
-/**
- * Loopback addresses this daemon is allowed to bind.
- *
- * `localhost` is included because it is what a person would type, but it is only
- * equivalent to `127.0.0.1` if it resolves there — so it is resolved rather than trusted.
- */
+/** Accepted loopback host names. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"])
 
-/**
- * Is this a loopback address?
- *
- * `localhost` is allowed because it is what a person would type, but it is only equivalent
- * to `127.0.0.1` if it resolves there — so it is resolved rather than trusted.
- *
- * Not exported: `validate` is the only caller, and it is a refusal rule rather than a
- * vocabulary anyone else needs. It used to be exported from a module that also owned path
- * layout and the status schema, which is how a helper nobody outside the file uses ends up
- * looking like part of the interface.
- */
+/** Check the host spelling; this does not perform a DNS lookup. */
 function isLoopbackHost(host: string): boolean {
   const bare = host.replace(/^\[|\]$/g, "").toLowerCase()
   if (LOOPBACK_HOSTS.has(bare)) return true
@@ -139,12 +72,7 @@ function requireNumber(value: unknown, field: string, fallback: number): number 
 }
 
 /**
- * The port, where zero means "let the kernel pick".
- *
- * Zero is a real port request rather than a nonsense one, and it is the only way to run
- * two daemons on one machine without picking a free port by hand — which is what every
- * test file was doing, each with its own `7000 + random()` guess and a matching chance
- * of colliding with something. So it is allowed here and nowhere else.
+ * Validate a TCP port. Zero asks the kernel for a free port, useful in tests.
  */
 function requirePort(value: unknown, field: string, fallback: number): number {
   if (value === undefined) return fallback
@@ -155,11 +83,7 @@ function requirePort(value: unknown, field: string, fallback: number): number {
 }
 
 /**
- * Validate rather than coerce.
- *
- * A silently-defaulted backend command is the failure mode worth preventing: the
- * daemon would start, answer requests, and be talking to nothing. Better to refuse to
- * boot and name the field.
+ * Reject invalid values with the source and field name instead of coercing them.
  */
 export function validate(raw: unknown, source: string): Config {
   if (typeof raw !== "object" || raw === null) {
@@ -182,20 +106,14 @@ export function validate(raw: unknown, source: string): Config {
           `${source}: backends.${name}.command must be a non-empty string array for a stdio-mcp backend`,
         )
       }
-      // Required rather than defaulted. The tool surface cannot be discovered without
-      // starting the process, and starting the process is the cost the lazy-start contract
-      // forbids on this path — so an empty list here would mean a session that registers
-      // no tools, with a healthy daemon and no error to explain it. That is the silent
-      // failure worth refusing instead.
+      // Require a declared list so setup can register tools without starting the model.
       const tools = entry.tools
       if (!Array.isArray(tools) || tools.length === 0 || tools.some((t) => typeof t !== "string" || t.length === 0)) {
         throw new Error(
           `${source}: backends.${name}.tools must be a non-empty string array, naming the tools ` +
             `this backend exposes without its product prefix (e.g. ["predict", "status"]).\n` +
-            `onesystem cannot discover these at startup: reading them from the model is the ` +
-            `20-54s load and 3 GB of VRAM that lazy start exists to avoid, so they are ` +
-            `declared here. Run \`onesystem status\` after a first call to see what the model ` +
-            `actually publishes, and add anything missing here.`,
+            `onesystem cannot discover these at startup without loading the model. ` +
+            `Use the backend's MCP tools/list to inspect its tools; this starts the process.`,
         )
       }
       backends[name] = {
@@ -257,10 +175,7 @@ export function validate(raw: unknown, source: string): Config {
     DEFAULTS.idleSweepSecs,
   )
   if (idleSweepSecs > idleShutdownSecs) {
-    // Not fatal on its own — a coarse sweep only makes shutdown late — but a window this
-    // short means the tick which first notices a backend warm can also decide it went
-    // quiet, which winds the daemon down under a request that just completed. Say so at
-    // load time instead of leaving it to be diagnosed as a daemon that will not stay up.
+    // Reject a sweep interval that can miss the entire idle window.
     throw new Error(
       `${source}: idleSweepSecs (${idleSweepSecs}) must not exceed idleShutdownSecs ` +
         `(${idleShutdownSecs}); a sweep coarser than the window can reap a backend on the ` +
@@ -284,11 +199,7 @@ export function validate(raw: unknown, source: string): Config {
 }
 
 /**
- * Read the routing block, or omit it.
- *
- * Omitted rather than defaulted to `{enabled: false}` so that "no routing" and "routing
- * explicitly off" are the same object, and `routing` stays undefined unless someone
- * actually wrote one.
+ * Omit routing unless it enables routing or declares a default or task map.
  */
 function readRouting(raw: unknown): RoutingConfig | undefined {
   if (typeof raw !== "object" || raw === null) return undefined
@@ -324,11 +235,7 @@ export async function loadConfig(path?: string): Promise<{ config: Config; path:
 }
 
 /**
- * Parse as JSONC so the config can carry the comments that explain the timings.
- *
- * A hand-rolled comment-stripping regex was the first attempt and it is the wrong tool:
- * `//` appears inside strings (every baseUrl), so any regex has to know about string
- * context, and getting that subtly wrong corrupts values silently.
+ * Parse JSONC with trailing commas. A comment-stripping regex would corrupt URL strings.
  */
 function parseConfig(text: string, source: string): unknown {
   const errors: ParseError[] = []

@@ -1,16 +1,6 @@
 /**
- * Two daemons, and the race that keeps there being one.
- *
- * The whole point of the lock and the port check is that several opencode sessions start
- * at once, all decide the daemon is down, and only one result. A test can cover that at
- * the unit level, and `lock.test.ts` does — but the part that actually failed in practice
- * was the boundary between the two processes: `start` spawns a detached `serve` and
- * interprets its exit code, and that contract was never tested at all. It broke in the
- * live check: a lost race exited 1 instead of 3, so `start` reported failure for a
- * perfectly good daemon that a sibling was serving.
- *
- * These run the real CLI as a subprocess, so what is asserted is the exit code another
- * process actually observes.
+ * Race real CLI subprocesses. A losing serve must exit 3 so start waits for the
+ * winning daemon instead of reporting a crash. Lock unit tests cannot check this boundary.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

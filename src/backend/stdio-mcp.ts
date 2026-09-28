@@ -1,34 +1,9 @@
 /**
- * MCP-over-stdio backend.
- *
- * Spawns a local process, completes the MCP `initialize` handshake, and forwards
- * methods to it. This is the `laya` path, and it keeps every bit of the GPU-specific
- * behaviour that already works: the shim owns interpreter selection (ROCm torch vs the
- * mise build), the idle-unload watchdog, and the per-call timeout. onesystem does not
- * reimplement any of that, it just supervises the process.
- *
- * The reason the start is slow is worth stating, because it looks like a hang and gets
- * diagnosed as one. laya's server imports `laya.router`, which pulls in transformers,
- * measured here at 25-30s, and it does that before it binds stdio. So the child is silent
- * for ~30s after spawn. `startupTimeoutSecs` defaults to 180 because of that silence, not
- * because the work is slow.
- *
- * ## The stop/start race
- *
- * A cold load takes 20-54s, which is a long time for a shutdown to overlap with. The
- * original code read `this.#client` in `stop()`, but that field is only assigned once
- * `connect()` has resolved — so a stop arriving during a load closed nothing, returned
- * immediately, and let the caller release the lock and exit. Thirty seconds later the
- * handshake finished, set the state to `warm`, and left a live process holding VRAM that
- * nothing was accounting for. A successor daemon could then start a second copy into a
- * GPU the first one was still sitting in, which is the exact failure this project exists
- * to prevent.
- *
- * The fix is a generation counter rather than a flag, because a flag would have to be
- * reset for the idle sweep's reaping (which quiesces a backend and expects a later call
- * to start it again) and a reset flag is a race waiting to happen. A quiesce bumps the
- * generation; a start records the generation it began under and refuses to publish a
- * client that the generation has moved past.
+ * Start a local MCP process, complete its handshake, and forward requests.
+ * Laya can spend about 30 seconds importing transformers before binding stdio;
+ * startupTimeoutSecs allows for this. The supervisor owns idle and request policy.
+ * Quiesce advances a generation counter and waits for any pending start. A stale
+ * start closes its child instead of publishing it after shutdown.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -53,14 +28,8 @@ import { BackendError, type Backend, type BackendState, type BackendStatus, type
 const log = logger("stdio-mcp")
 
 /**
- * MCP method -> the SDK schema that validates its result.
- *
- * `Client.request` needs a real zod schema for the second argument; it calls
- * `safeParse` on whatever it is given. Passing a pass-through function looks like it
- * works and fails at runtime on the first call, so each forwarded method is mapped to
- * the schema the SDK publishes for it. An unmapped method is refused rather than
- * forwarded blind, because a wrong schema would reject a valid response and turn a
- * working backend into an unexplained error.
+ * SDK result schema for each supported MCP method. Client.request calls safeParse,
+ * so it needs a schema, not a pass-through function. Reject unmapped methods.
  */
 const RESULT_SCHEMAS = {
   "tools/list": ListToolsResultSchema,
@@ -86,12 +55,7 @@ export class StdioMcpBackend implements Backend {
   #client: Client | null = null
   #starting: Promise<void> | null = null
   /**
-   * The per-call ceremony, in one place.
-   *
-   * It was three fields on this class — `#lastActivityAt`, `#inflight`, `#usage` — with the
-   * increment and the release typed out by hand around the request. `inflight` in
-   * particular is not bookkeeping: the idle sweep skips any backend above zero, so a leak
-   * parks this backend at busy forever and it never releases its VRAM. See `CallLedger`.
+   * Shared call accounting. Leaked inflight counts would prevent idle shutdown.
    */
   #ledger: CallLedger
   /**
@@ -105,8 +69,7 @@ export class StdioMcpBackend implements Backend {
     private readonly spec: StdioBackend,
     private readonly deps: { now?: () => number } = {},
   ) {
-    // `() => this.#now()`, not `this.#now` — a bare method reference loses its receiver and
-    // the failure is a `this is undefined` thrown from inside the clock.
+    // Keep the clock method bound to this backend.
     this.#ledger = new CallLedger(() => this.#now())
   }
 
@@ -123,9 +86,7 @@ export class StdioMcpBackend implements Backend {
   }
 
   /**
-   * Declared in config, never asked of the child. See `Backend#tools` for why the two
-   * facts cannot be the same one: reading this from the process would make session start
-   * pay the model load, which is the whole thing the supervisor exists to avoid.
+   * Read tool names from config without starting the child.
    */
   get tools(): readonly string[] {
     return this.spec.tools
@@ -149,12 +110,7 @@ export class StdioMcpBackend implements Backend {
   }
 
   async #doStart(generation: number): Promise<void> {
-    // The `180` is unreachable for any config that came through `validate`, which always
-    // populates `startupTimeoutSecs`; it exists only for a hand-built spec, which is what
-    // the lifecycle tests build. So the number that decides anything is the config's, and
-    // this is a last-resort default for a caller that skipped validation. It is written
-    // out rather than shared because there is no constant for it, and a shared constant
-    // would be the better answer if there were ever a second reader.
+    // Fallback for hand-built specs; validate normally supplies this value.
     const timeoutMs = (this.spec.startupTimeoutSecs ?? 180) * 1000
     const started = this.#now()
     log.info("spawning", { command: this.spec.command[0], timeoutMs })
@@ -184,9 +140,7 @@ export class StdioMcpBackend implements Backend {
       )
     }
 
-    // A quiesce landed while the handshake was in flight. It has already returned, and
-    // the caller believes everything is stopped, so publishing the client now would be a
-    // lie with a live process attached. Tear it down instead.
+    // Quiesce invalidated this start while the handshake was pending.
     if (generation !== this.#generation) {
       this.#state = "cold"
       await client.close().catch(() => {})
@@ -211,10 +165,7 @@ export class StdioMcpBackend implements Backend {
     const wasCold = this.#state === "cold"
     this.#state = "stopping"
 
-    // A cold load may be in flight, and the child it is spawning is the resource we are
-    // here to release. Let it settle first; #doStart will notice the generation moved and
-    // close its own child. Without this, tearing down a half-open handshake and letting
-    // the start finish behind us is how a stopped daemon ends up still holding VRAM.
+    // Wait for #doStart to detect the new generation and close its child.
     const starting = this.#starting
     if (starting) await starting.catch(() => {})
 
@@ -245,12 +196,7 @@ export class StdioMcpBackend implements Backend {
     // reaches the model, so it is not a call and gets no duration and no error count.
     try {
       return await this.#ledger.track(async () => {
-        // The cold start is inside the tracked region. It is 20-54s, it is the largest
-        // thing `lastMs` will ever report for a local model, and leaving it out is exactly
-        // what let `BackendStatus.lastMs` mean end-to-end for a remote backend and
-        // inference-only for this one — same field, two meanings, decided by which adapter
-        // the reader happened to be looking at. `CallLedger` exists so that a third
-        // transport cannot reintroduce the difference.
+        // Include cold startup in inflight and end-to-end timing.
         await this.start()
         const client = this.#client
         if (!client) throw new BackendError(this.name, "backend is not connected")
@@ -271,15 +217,6 @@ export class StdioMcpBackend implements Backend {
     }
   }
 
-  /**
-   * The read-only view, and only the read-only view.
-   *
-   * This used to widen the return type with `& { command; generation }`. Nothing read
-   * either: `command` is available from the config and `generation` is the internal counter
-   * of the stop/start race fix, published on a public read and then structurally
-   * unreachable from anywhere. It is a private field now, which is what it always was in
-   * substance.
-   */
   describe(): BackendStatus {
     return {
       name: this.name,
@@ -294,11 +231,8 @@ export class StdioMcpBackend implements Backend {
 }
 
 /**
- * Bound the handshake, and say so plainly.
- *
- * Local, because a start has no caller-supplied signal to ride: the abort would have to
- * be threaded through `start()`, and the only thing that wants to cancel a start is a
- * quiesce — which is already handled by the generation counter, not by a timer.
+ * Bound the handshake wait. The caller closes the client on timeout;
+ * quiesce invalidates pending starts through the generation counter.
  */
 function withStartupTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {

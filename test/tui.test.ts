@@ -1,10 +1,5 @@
 /**
- * The footer status line.
- *
- * The line is the whole feature, so it is a pure function of the health report and tested
- * as one. Formatting is what rots: a new backend state gets added, nobody remembers there
- * is a switch in `tui.ts`, and the TUI quietly starts saying "cold" for a backend that is
- * mid-load.
+ * Verify status text, counts, and tones from health reports without a terminal.
  */
 
 import { describe, expect, test } from "bun:test"

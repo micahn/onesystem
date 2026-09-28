@@ -1,20 +1,5 @@
 /**
- * "Install and switch", and the two code paths that have to agree about it.
- *
- * The TUI menu described itself as "model status, install and switch" and did neither half
- * of the second one: it installed a model and then told you to hand-edit the config, while
- * `config-edit.ts` — which exists to make exactly that edit without destroying the file's
- * comments, and is already wrapped as `onesystem use` — sat on the other side of the repo
- * unreachable from the menu.
- *
- * What this file pins is not the menu, which needs a TUI to drive. It is the thing the two
- * halves of the menu have in common, and the thing that was previously true of neither: the
- * set of names the menu offers, the set the CLI accepts, and what an unknown one does.
- *
- * Before this, `MODELS` was read in three modules and validated in two, from the same
- * array, with nothing asserting that they were the same list — and one of those two
- * validations was a `findModel(name)` whose result was assigned and never used, because
- * `noUnusedLocals` was off.
+ * Check that the CLI and TUI share model names, config switching, and unknown-name errors.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

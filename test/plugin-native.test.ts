@@ -1,9 +1,5 @@
 /**
- * The plugin registering native tools instead of MCP servers.
- *
- * The change under test is not "does it work" but "does it work the same way it used to,
- * from the session's point of view". A session should end up with the same tools, the same
- * recovery behaviour, and one fewer thing in its MCP server list.
+ * Verify native tool registration, forwarding, and recovery after daemon shutdown.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

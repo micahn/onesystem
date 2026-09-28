@@ -1,11 +1,6 @@
 /**
- * Backend lifecycle, through the seam rather than through a process.
- *
- * Every test here is about a rule that used to be spread across three modules and stated
- * in none of them. The interface declared a signal no caller set, the idle sweep read
- * public mutable fields, and `stop()` during `start()` was possible to write and impossible
- * to see. None of that is reachable through a real daemon without a 20-54s model load, so
- * these use a fake at the `Backend` seam — which is the point of having one.
+ * Test idle and cancellation policy with fake backends. Test start/stop races
+ * with a real MCP child so cleanup must release an actual process.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

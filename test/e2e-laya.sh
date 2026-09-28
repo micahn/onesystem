@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end check against the real laya backend.
-#
-# The property being verified is the one the project exists for: starting the service
-# loads nothing, the first request loads exactly one copy, and stopping releases it.
-# Every step prints the observable it cares about so a failure says which claim broke.
+# Check real laya on AMD/ROCm: start cold, load one process, then release it.
+# Stops and starts the daemon on port 7331.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,10 +11,7 @@ CLI="bun run src/cli.ts"
 vram() { rocm-smi --showmeminfo vram 2>/dev/null | grep -oP 'Used Memory \(B\): \K[0-9]+'; }
 mb() { echo "$(( $1 / 1024 / 1024 )) MB"; }
 
-# Count only the laya processes onesystem itself owns, as children of the daemon.
-# A global `pgrep -f laya` is not a usable signal here: opencode keeps its own per-session
-# laya servers alive, and they load and idle-unload on a 300s timer, so the global count
-# moves underneath the test for reasons that have nothing to do with onesystem.
+# Count only daemon children; unrelated laya processes can start or stop independently.
 owned_laya() {
   local dpid
   dpid=$(curl -s --max-time 2 "${URL}/health" 2>/dev/null | sed 's/\\//g' | grep -oP '"pid":\s*\K[0-9]+' | head -1)
@@ -25,8 +19,7 @@ owned_laya() {
   pgrep -P "$dpid" -f laya-mcp-server 2>/dev/null | wc -l
 }
 
-# Always start from a known state. A previous run that died mid-way leaves a daemon
-# holding the lock, and the next `start` will (correctly) refuse to start a second one.
+# Stop any daemon left by a previous run.
 echo "=== pre-flight: stop any existing daemon ==="
 $CLI stop 2>&1 | tail -2
 sleep 1
@@ -39,9 +32,7 @@ post() { # post <json> [session-id]
     -d "$1"
 }
 
-# MCP answers over Streamable HTTP arrive as an SSE frame whose `data:` line holds
-# escaped JSON, so `"device": "cpu"` is really `\"device\": \"cpu\"`. Strip the
-# escaping before matching, otherwise every content assertion silently misses.
+# Strip JSON escapes from MCP text content before matching fields.
 flat() { sed 's/\\//g'; }
 
 echo "=== baseline ==="
@@ -60,10 +51,7 @@ if [ "$L1" -ne 0 ]; then echo "FAIL: start spawned laya ($L1); it must stay lazy
 
 echo
 echo "=== GET /catalog (must NOT load a model either) ==="
-# The one endpoint that used to break the invariant. The plugin reads this at session
-# start to learn the tool surface, and it used to forward `tools/list` to each backend --
-# so opening a session loaded every model before the agent asked anything. The surface is
-# declared in config now and read from there.
+# Plugin setup reads this endpoint, so it must list tools without starting a model.
 CAT=$(curl -s --max-time 5 "${URL}/catalog")
 echo "catalog tools: $(echo "$CAT" | sed 's/\\//g' | grep -oP '"name":\s*"\K[^"]+' | tr '\n' ' ')"
 V_CAT=$(vram); L_CAT=$(owned_laya)
@@ -90,16 +78,8 @@ post '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$SID" >/dev/null
 T0=$(date +%s%N)
 TOOLS=$(post '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' "$SID")
 echo "tools/list in $(( ($(date +%s%N) - T0) / 1000000 ))ms"
-# Assert on content, not timing. An earlier version of this script passed while every
-# call was failing: the shim had died on a missing LAYA_PYTHON, the bridge returned
-# error payloads fast, and nothing here looked at the body.
-#
-# The names here are the *stripped* ones, because that is what the bridge hands
-# opencode: the `laya_` prefix is removed on the way out and put back on the way in, so
-# the wire name is `predict`. This script used to grep for `laya_predict` here and call
-# `laya_predict` below, which stopped being true when the stripping was added -- and the
-# call then failed as "Unknown tool: laya_laya_predict", the bridge having helpfully
-# prefixed an already-prefixed name.
+# Check content: fast error responses do not prove success.
+# MCP clients use stripped names; the bridge restores laya_ when forwarding calls.
 if ! echo "$TOOLS" | grep -q '"name":"predict"'; then
   echo "FAIL: tools/list did not return the predict tool. Body was:"
   echo "$TOOLS" | head -c 600; echo
@@ -119,8 +99,7 @@ echo "predict in $(( ($(date +%s%N) - T1) / 1000000 ))ms"
 if ! echo "$PRED" | flat | grep -q '"choice"'; then
   echo "FAIL: predict returned no answer. Body was:"; echo "$PRED" | head -c 600; echo; exit 1
 fi
-# device must be cuda. A cpu here is the exact silent-fallback failure this project
-# was built to end, so it is asserted rather than eyeballed.
+# Reject a reported CPU fallback.
 echo "device: $(echo "$PRED" | flat | grep -oP '"device":\s*"[^"]*"' | head -1)"
 echo "$PRED" | flat | grep -oP '"choice":\s*"[^"]*"' | head -2
 if echo "$PRED" | flat | grep -q '"device":\s*"cpu"'; then echo "FAIL: ran on cpu"; exit 1; fi

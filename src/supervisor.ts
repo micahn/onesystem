@@ -1,35 +1,8 @@
 /**
- * Backend supervisor: owns when models exist.
- *
- * This is the module that encodes the project's actual requirement, which is easy to
- * state and easy to get wrong:
- *
- *   Loading the plugin must cost plugin memory and nothing else. No model may load
- *   until an agent actually calls a tool. And once traffic stops, everything should
- *   wind down on its own after a long quiet window, so the GPU is not held by a
- *   service nobody is using.
- *
- * So the daemon process itself is cheap (a few MB) and starts immediately, and models
- * are strictly lazy. The idle sweep is what makes the pair work: it stops a backend
- * that has been quiet past the window, and reports back to the daemon that nothing is
- * warm any more, which is the daemon's cue to exit and release the port and lock.
- *
- * ## What this module deliberately does not know
- *
- * `systemone-http` backends are somebody else's already-running process, so quiescing one
- * would mean killing a service onesystem does not own. That used to be a
- * `backend.transport === "stdio-mcp"` predicate here, duplicated by the factory switch,
- * by config validation, and by a special case in the request path — four places to
- * update to add a transport. It is now one declaration on the adapter
- * (`BackendStatus#local`), read through `describe()`.
- *
- * Likewise, `tools/list` for the systemone adapter is answered by the adapter. It used to
- * be special-cased here, which meant the supervisor knew one transport's tool surface, and
- * the request path had a branch that only applied to one backend. Adding a third transport
- * would have needed a fourth edit here.
- *
- * The supervisor keeps the *policy* — when it is safe to stop something, when the quiet
- * window has passed — and delegates every mechanism to the adapter.
+ * Own lazy startup, request deadlines, and idle shutdown policy.
+ * Only calls may load models. Stop warm local backends after the idle window when
+ * no call is in flight; remote services remain independently managed.
+ * Adapters implement transport and cleanup. The supervisor reads their status.
  */
 
 import type { Config } from "./config.ts"
@@ -62,12 +35,7 @@ export class Supervisor implements BackendPort {
   #onIdle: (() => void) | null = null
   #quiescing = false
   /**
-   * Whether a local backend has ever been warm.
-   *
-   * Without this the idle sweep would fire its callback on the very first tick, before
-   * anything was ever loaded, and the daemon would exit immediately after starting.
-   * The daemon is meant to sit idle and cheap until the first request; it is only meant
-   * to wind down after it has held something and then let it go quiet.
+   * Keep a new daemon available until a local backend has been warm at least once.
    */
   #everWarm = false
 
@@ -129,8 +97,7 @@ export class Supervisor implements BackendPort {
    * passed the quiet window.
    */
   watchIdle(onIdle: () => void): void {
-    // Calling this twice used to leak the first interval, which then kept sweeping a
-    // supervisor that was supposed to be idle.
+    // Replace any existing timer.
     this.stopWatching()
     this.#onIdle = onIdle
     const intervalMs = this.config.idleSweepSecs * 1000
@@ -147,36 +114,19 @@ export class Supervisor implements BackendPort {
   }
 
   /**
-   * One pass of the idle check.
-   *
-   * A backend is only reaped when it is warm, has no in-flight request, and has been
-   * quiet past the window. `state === "starting"` is deliberately not reaped: a cold
-   * load in progress is the most expensive thing the process does, and killing it
-   * because it has not answered *yet* would guarantee a permanently cold service.
-   *
-   * Everything this needs is read from `describe()`, which is the read-only view of a
-   * backend's accounting. The sweep does not reach in and touch `lastActivityAt`, so
-   * those numbers cannot be corrupted from outside, and a backend's internals are one
-   * method rather than a set of public fields.
+   * Stop only local, warm backends with no requests and an expired idle window.
+   * A starting backend must finish loading before it can be considered idle.
    */
   sweep(): void {
     if (this.#quiescing) return
 
-    // Entries, not values: a backend's status carries its own `name`, and looking it back
-    // up by that name is a second source of truth for something the map already knows.
-    // It is also wrong the moment the two disagree, which is a silent no-op rather than a
-    // crash that would have been noticed.
     for (const backend of this.#backends.values()) {
       const status = backend.describe()
       if (!status.local) continue
       if (status.state !== "warm") continue
 
-      // Observed here rather than at request time on purpose. A backend is only
-      // "warm" once its handshake has actually completed, and the sweep is the only
-      // place that reliably observes that. Setting it in the request path instead
-      // reads the state *before* the forward starts, where a first request always
-      // looks cold -- which silently disables idle shutdown for a service that only
-      // ever sees one request.
+      // Observe after startup. Reading before the first call would see only "cold"
+      // and could leave a one-call daemon unable to shut down.
       this.#everWarm = true
 
       if (status.inflight > 0) continue
@@ -199,13 +149,8 @@ export class Supervisor implements BackendPort {
   }
 
   /**
-   * Forward one MCP request for a backend.
-   *
-   * This is the only path that may cause a model to load. Everything about the cold
-   * cost lands here, on a call the agent actually made. The deadline is applied here
-   * rather than in the adapter because the budget is onesystem's policy, not the
-   * transport's — and because a timeout the adapter does not know about is a timeout
-   * the adapter cannot honour.
+   * Forward a request, starting a cold backend if needed. Pass the shared request
+   * budget and cancellation signal to the adapter.
    */
   async call(
     name: string,
@@ -223,10 +168,7 @@ export class Supervisor implements BackendPort {
     const deadline = startDeadline(timeoutMs)
     const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal
     try {
-      // Two layers on purpose. The signal is the real cancellation: it reaches the
-      // transport, so an overrunning call stops holding the backend's inflight count and
-      // the backend becomes reapable again. The race is the backstop for an adapter that
-      // ignores its signal, so a caller is never left hanging either way.
+      // Abort the work first. Bound the wait too, in case an adapter ignores cancellation.
       const result = await withTimeout(
         backend.call({ method, params, signal: combined, timeoutMs }),
         timeoutMs + 1000,

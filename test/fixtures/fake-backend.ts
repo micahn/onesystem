@@ -1,17 +1,6 @@
 /**
- * A backend that is not a backend.
- *
- * Two reasons this exists rather than mocking at the call sites:
- *
- *   1. The `Backend` interface is a real seam — two adapters sit behind it — so it is the
- *      test surface. A fake that implements it is the correct way to exercise anything
- *      that is not a backend, and it needs no child process and no GPU.
- *   2. Cancellation and the idle window are policy, not process management, so a fake is
- *      the honest way to test them: no sleeps, no child, no clock drift.
- *
- * The stop/start race is *not* here. That one is about whether a real spawned process is
- * actually reaped, so it is tested against a real one in `lifecycle.test.ts` with
- * `slow-mcp.ts` — a fake could only assert that it was told to quiesce.
+ * Fake backends for policy tests without a GPU, process, or real clock.
+ * Process cleanup is tested with slow-mcp.ts in lifecycle.test.ts.
  */
 
 import type { Backend, BackendState, BackendStatus, CallContext } from "../../src/backend/types.ts"

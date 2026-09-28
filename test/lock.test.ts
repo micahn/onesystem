@@ -1,11 +1,6 @@
 /**
- * The single-instance guard.
- *
- * This is the test that matters most, because the guard protects against a race that
- * only appears when things go wrong: several opencode sessions load the plugin at once,
- * all of them decide the service is down, and two daemons start. A sequential test
- * cannot catch that, so the concurrency test fires all the acquires in the same tick
- * and asserts exactly one winner.
+ * Concurrent acquires must produce exactly one winner. Sequential tests cannot
+ * detect the race between sessions starting the shared daemon.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

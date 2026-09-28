@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Verify the tool surface reads `onesystem.<tool>`, not `onesystem.laya_<tool>`.
-#
-# Checks both directions of the rename, because a rename applied to only the catalog
-# produces a server that advertises `predict` and then fails every call to it.
+# Check that MCP lists stripped names and restores the backend prefix on calls.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 URL="http://127.0.0.1:7331/mcp/laya"

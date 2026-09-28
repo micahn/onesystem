@@ -1,23 +1,14 @@
 #!/usr/bin/env bash
 #
-# onesystem installer. One command, from nothing to a model answering on the GPU.
+# Install onesystem and a GPU model runtime.
 #
 #   curl -fsSL https://raw.githubusercontent.com/micahn/onesystem/master/install.sh | bash
 #
-# Safe to re-run. Every step checks before it acts, nothing is overwritten without asking,
-# and the only thing it will not do on its own is install system packages -- that one is
-# behind a prompt, because a pipe into bash has no business running sudo uninvited.
-#
-# Stage UX follows the /wizard conventions: progress, a confirmation gate before anything
-# irreversible, and a summary at the end. The library's browser and secret helpers are
-# gone: an installer opens no dashboards and captures no API keys, and the `.env` writer
-# would be actively wrong here, because onesystem is configured in JSONC.
+# Re-runs update the checkout and skip installed runtimes. Ask before running sudo.
 
 set -euo pipefail
 
-# ──────────────────────────────────────────────────────────────────────────
-# UX. Identical across every wizard, minus the parts an installer cannot use.
-# ──────────────────────────────────────────────────────────────────────────
+# Terminal helpers
 
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
   BOLD=$(tput bold); DIM=$(tput dim); RESET=$(tput sgr0)
@@ -26,15 +17,14 @@ else
   BOLD=""; DIM=""; RESET=""; BLUE=""; GREEN=""; YELLOW=""; RED=""
 fi
 
-# Author sets this at the top of the stages section.
+# Set before the first stage.
 TOTAL_STAGES=0
 
 _STAGE_INDEX=0
 SKIPPED=()   # things the human still has to do
 DONE=()      # things this run changed, for the closing summary
 
-# _clear wipes the terminal so only the current step is on screen. No-op when
-# output isn't a terminal, so piped logs stay readable.
+# Clear terminals only; preserve piped logs.
 _clear() {
   [[ -t 1 ]] || return 0
   if command -v tput >/dev/null 2>&1; then tput clear; else printf '\033[2J\033[3J\033[H'; fi
@@ -43,7 +33,7 @@ _clear() {
 banner() {
   _clear
   printf '\n%s%s  %s%s\n' "$BOLD" "$BLUE" "$1" "$RESET"
-  printf '%s  %s stages · safe to re-run · nothing is overwritten without asking%s\n\n' "$DIM" "$TOTAL_STAGES" "$RESET"
+  printf '%s  %s stages · asks before running sudo%s\n\n' "$DIM" "$TOTAL_STAGES" "$RESET"
 }
 
 stage() {
@@ -87,27 +77,21 @@ finish() {
   printf '\n'
 }
 
-# ──────────────────────────────────────────────────────────────────────────
-# STAGES
-# ──────────────────────────────────────────────────────────────────────────
+# Install stages
 
 TOTAL_STAGES=7
 
 REPO_URL="https://github.com/micahn/onesystem.git"
-# A stable location, because the plugin is registered by absolute path and a path that
-# moves on the next run breaks a session that is already open. Override with ONESYSTEM_DIR.
+# Keep this path stable: plugin registration uses an absolute path.
 INSTALL_DIR="${ONESYSTEM_DIR:-$HOME/.local/share/onesystem/repo}"
 MODEL="${ONESYSTEM_MODEL:-laya}"
 CONFIG_DIR="${ONESYSTEM_CONFIG_DIR:-$HOME/.config/onesystem}"
 CONFIG="$CONFIG_DIR/onesystem.jsonc"
-# Set only when this script cloned the source itself. The uninstall hint names a directory
-# only when the script put it there: told to `rm -rf` a path the person chose, an installer
-# deletes whatever happens to be sitting there.
+# Only suggest deleting source that this run cloned.
 OWNS_SOURCE=0
 
 banner "onesystem installer"
 
-# ── Stage 1: what is on this machine already ─────────────────────────────
 stage "Preflight"
 
 missing=()
@@ -121,13 +105,10 @@ else
   missing+=("bun")
 fi
 
-# uv is only needed to build a model runtime, which is a later stage. Reported here so a
-# missing uv is found before a several-minute download, not after.
+# Check runtime build tools before downloading.
 command -v uv >/dev/null 2>&1 && ok "uv $(uv --version 2>/dev/null | head -1)" || missing+=("uv")
 
-# `onesystem install` reads the vendor from lspci and the gfx target from rocm-smi, and
-# refuses without both rather than guessing. So a missing one is a hard stop, found here
-# instead of three stages from now. On NVIDIA neither is needed.
+# Detect the vendor with lspci. AMD also needs rocm-smi for its gfx target.
 VENDOR="unknown"
 if command -v lspci >/dev/null 2>&1; then
   line=$(lspci | grep -iE 'vga|3d|display' || true)
@@ -143,10 +124,9 @@ if [[ "$VENDOR" == "amd" ]]; then
   if [[ -x /opt/rocm/bin/rocm-smi ]] || command -v rocm-smi >/dev/null 2>&1; then
     ok "rocm-smi present"
   else
-    warn "rocm-smi is missing. onesystem install reads the GPU's gfx target from it and"
-    warn "refuses to guess, so a model cannot be built until it is installed."
+    warn "Install rocm-smi to detect the AMD GPU target."
     missing+=("rocm-core")
-    [[ -d /opt/rocm/bin ]] || SKIPPED+=("add /opt/rocm/bin to your PATH, or rocm-smi stays invisible")
+    [[ -d /opt/rocm/bin ]] || SKIPPED+=("add /opt/rocm/bin to PATH")
   fi
 elif [[ "$VENDOR" == "nvidia" ]]; then
   ok "GPU: NVIDIA (lspci) · no ROCm needed"
@@ -159,14 +139,13 @@ elif [[ "$VENDOR" == "unknown" ]]; then
   fi
 fi
 
-# opencode is checked here rather than at the end because a V1 host cannot load the plugin
-# at all, and finding that out after a 4 GB download is the worst possible time.
+# Check the plugin host before downloading model dependencies.
 OPENCODE_VER="(not found)"
 if command -v opencode >/dev/null 2>&1; then
   OPENCODE_VER=$(opencode --version 2>/dev/null | head -1 || echo "(unknown)")
   ok "opencode $OPENCODE_VER"
   if [[ "$OPENCODE_VER" == *v1* ]]; then
-    warn "this is opencode V1, which has no plugin API -- the tools will not appear."
+    warn "This plugin requires OpenCode V2."
     SKIPPED+=("install opencode V2 and put it first on PATH; V1 and V2 can coexist")
   fi
 else
@@ -191,11 +170,9 @@ else
   ok "nothing missing"
 fi
 
-# ── Stage 2: the source ──────────────────────────────────────────────────
 stage "Source"
 
-# Two ways to arrive here. Run from a checkout, the script sits next to the code and uses
-# it. Piped from curl, $0 is `bash` and there is no checkout, so it clones.
+# Use the script's checkout, or clone when piped from curl.
 SELF_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -204,7 +181,7 @@ fi
 if [[ -n "$SELF_DIR" && -f "$SELF_DIR/src/cli.ts" ]]; then
   INSTALL_DIR="$SELF_DIR"
   ok "using this checkout: $INSTALL_DIR"
-  note "  set ONESYSTEM_DIR to install somewhere else"
+  note "  curl installs use ONESYSTEM_DIR to choose the checkout path"
 elif [[ -d "$INSTALL_DIR/.git" ]]; then
   step "updating $INSTALL_DIR"
   git -C "$INSTALL_DIR" pull --ff-only || warn "could not pull; continuing with what is on disk"
@@ -220,19 +197,17 @@ DONE+=("source: $INSTALL_DIR")
 
 cd "$INSTALL_DIR"
 
-# ── Stage 3: dependencies ────────────────────────────────────────────────
 stage "Dependencies"
 
 step "bun install"
 bun install || die "bun install failed"
 ok "dependencies installed"
 
-# ── Stage 4: the config file ─────────────────────────────────────────────
 stage "Config"
 
 if [[ -f "$CONFIG" ]]; then
   ok "already there: $CONFIG"
-  note "  left alone. 'onesystem install' fills in the paths it needs."
+  note "  'onesystem install' updates model paths."
 else
   mkdir -p "$CONFIG_DIR"
   cp onesystem.config.jsonc "$CONFIG"
@@ -240,45 +215,35 @@ else
   DONE+=("config: $CONFIG (template)")
 fi
 
-# ── Stage 5: the model ───────────────────────────────────────────────────
 stage "Model ($MODEL)"
 
 if bun run src/cli.ts runtimes 2>/dev/null | grep -qE "^${MODEL}[[:space:]]+ok"; then
   ok "$MODEL runtime already installed"
 else
-  note "This downloads ROCm torch and builds a venv. Several minutes the first time."
+  note "Downloads PyTorch and builds a runtime. Allow several minutes."
   step "onesystem install $MODEL"
-  # Writes the config block itself, so there is nothing to copy afterwards.
   bun run src/cli.ts install "$MODEL" || die "install $MODEL failed"
   ok "$MODEL installed and configured"
   DONE+=("model: $MODEL")
 fi
 
-# ── Stage 6: the opencode plugin ─────────────────────────────────────────
 stage "opencode plugin"
 
-# opencode V2 autodiscovers every .ts and .js file in ~/.config/opencode/plugins/, so
-# registering means writing one line there. It is a re-export of the checkout rather than a
-# copy, so `git pull` takes effect on the next reload instead of leaving a stale duplicate.
+# Register a re-export so checkout updates take effect on plugin reload.
 if bun run src/cli.ts register-plugin; then
   DONE+=("plugin registered in opencode's plugins directory")
 else
   SKIPPED+=("add the plugin by hand: create ~/.config/opencode/plugins/onesystem.ts")
 fi
 
-# ── Stage 7: check it ────────────────────────────────────────────────────
 stage "Verify"
 
 bun run src/cli.ts start >/dev/null 2>&1 || true
 sleep 1
 if bun run src/cli.ts status >/dev/null 2>&1; then
   ok "daemon is up and answering"
-  # Deliberately not printing per-backend state. `status` emits JSON, and scraping it with
-  # grep and paste produced pairs of unrelated fields: `name` and `state` are not adjacent
-  # in that document. The daemon being up is the fact worth reporting, and a cold backend
-  # is the expected reading anyway -- nothing loads until a request asks for it.
-  note "  backends read 'cold' until a tool call asks for one, which is correct"
-  note "  'bun run src/cli.ts status' prints the full picture"
+  note "  backends stay 'cold' until the first tool call"
+  note "  details: bun run src/cli.ts status"
 else
   warn "the daemon did not come up. Run 'bun run src/cli.ts status' to see why."
   SKIPPED+=("check: bun run src/cli.ts status")
@@ -286,8 +251,7 @@ fi
 
 finish
 
-# Only ever name a directory this script created. Told to `rm -rf` a path the person
-# chose -- a checkout, a home, a symlink target -- an installer deletes whatever is there.
+# Preserve existing checkouts in the uninstall hint.
 if (( OWNS_SOURCE )); then
   UNINSTALL="rm -rf '$INSTALL_DIR' '$CONFIG'"
 else
@@ -295,11 +259,9 @@ else
 fi
 
 cat <<EOF
-  ${BOLD}One thing left:${RESET} restart opencode. Plugins load at server start, so the
-  tools do not appear in a session that is already open.
+  ${BOLD}Restart OpenCode to load the plugin.${RESET}
 
-  Then ask it something. The first call loads the model and takes ~10-15s; after that it
-  is tens of milliseconds.
+  The first tool call loads the model (~10-15s). Warm calls take tens of milliseconds.
 
   ${DIM}To uninstall: $UNINSTALL
   and delete ~/.config/opencode/plugins/onesystem.ts.${RESET}

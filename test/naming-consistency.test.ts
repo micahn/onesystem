@@ -1,21 +1,6 @@
 /**
- * One name per backend, from all three modules.
- *
- * This file is the test the issue said could not be written. Its words: "A property test
- * over `resolve` / `planTools` / `registrations` for the same config, asserting one name
- * per backend from all three. That test is unwritable today, because there is no single
- * answer to compare."
- *
- * That was accurate, and the reason is worth keeping in mind when reading the assertions
- * below. Three modules implemented "what is this called" and each was internally consistent,
- * so nothing failed. With two backends and routing on, one backend had three names:
- * `registrations` said it was `onesystem-laya`, `resolve` said it was `onesystem`, and
- * `planTools` registered its tools as `predict`. No assertion could have caught that,
- * because each module was asked in isolation and each was right about its own question.
- *
- * So the property is not "each module names things correctly". It is that for one config,
- * the modules that report a *server* name report the same one, and the modules that decide
- * which tools are *bare* decide the same thing.
+ * For one config, registrations, routing, and tool planning must agree on server
+ * names and which backend keeps unqualified tools.
  */
 
 import { describe, expect, test } from "bun:test"

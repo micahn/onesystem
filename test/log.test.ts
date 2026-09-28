@@ -1,9 +1,5 @@
 /**
- * Log formatting, and the deadline helpers.
- *
- * Both were previously untestable rather than unimportant: the logger wrote straight to
- * `process.stderr.write` with no way in, and `describeError` existed as two private copies
- * in two modules with two different output formats for the same error.
+ * Shared log formatting, error descriptions, and deadline helpers.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

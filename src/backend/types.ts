@@ -1,28 +1,7 @@
 /**
- * Backend contract, and the port the rest of the daemon depends on.
- *
- * A backend is a System 1 decision service. The supervisor knows nothing about how one
- * is reached, only that it can forward MCP traffic to it, stop it, and describe it.
- *
- * The central property of this interface is that a forward is lazy and expensive while
- * everything else is cheap. Loading a model costs 20-54s and up to 3 GB of VRAM, so it
- * must never happen on a path the user did not ask for. Nothing in onesystem calls a
- * forward except a request an agent actually made.
- *
- * ## What is not in the interface, and why
- *
- * `lastActivityAt` and `inflight` used to be public mutable fields here, because the idle
- * sweep needed them. That put the accounting mechanism on the seam: any caller could write
- * them, and a test had to fake a clock and mutate state to exercise a policy decision.
- * They are private now, and the sweep reads them through `describe()` — which already
- * existed to answer "what is this backend doing" without loading anything, and is exactly
- * the question the sweep was asking. One read-only view, used by the one consumer.
- *
- * Likewise `forward` is now `call`, and it takes a signal that the implementation must
- * honour. The old signature accepted a signal that no caller ever set and no adapter ever
- * read, which made a request timeout abandon the work it claimed to bound: `inflight`
- * stayed above zero and the idle sweep skipped that backend forever. A cancellation path
- * that is optional in the interface is a cancellation path that does not happen.
+ * Backend lifecycle and supervisor interfaces. Only call may load a model;
+ * status and tool declarations must remain cheap. Adapters must honor cancellation
+ * and release in-flight accounting so the idle sweep can stop unused models.
  */
 
 import type { Transport } from "./spec.ts"
@@ -38,24 +17,14 @@ export interface CallContext {
    */
   signal?: AbortSignal
   /**
-   * Ceiling for this call, in milliseconds.
-   *
-   * The supervisor owns the deadline and expresses it twice on purpose. `signal` is the
-   * authority — it is the only form every adapter can honour — and `timeoutMs` lets an
-   * adapter hand the same budget to a library that wants a number instead. Without the
-   * number, the MCP SDK applies its own 60s default, which is *shorter* than the 120s
-   * onesystem is configured for, so a legitimately slow call would fail against a
-   * timeout the user never chose.
+   * Request budget in milliseconds. Pass to libraries alongside signal so their
+   * own defaults, such as the MCP SDK's 60 seconds, do not shorten the budget.
    */
   timeoutMs?: number
 }
 
 /**
- * One backend's status, read without loading anything.
- *
- * This is the whole of what the outside world may know about a backend's internals. The
- * idle sweep is a consumer: it reads `inflight` and `idleMs` to decide whether a backend
- * has gone quiet, and `local` to decide whether stopping it would release anything.
+ * Read-only status. The idle sweep uses local, inflight, and idleMs to decide what to stop.
  */
 export interface BackendStatus {
   name: string
@@ -66,20 +35,12 @@ export interface BackendStatus {
   /** Milliseconds since the last forward started or finished. */
   idleMs: number
   /**
-   * True when quiescing this backend releases local resources that onesystem owns.
-   *
-   * Declared here rather than inferred from `transport` at four call sites, so that a
-   * transport can be added without also updating every predicate that switches on it.
+   * True when quiesce releases local resources owned by onesystem.
    */
   local: boolean
   /**
-   * Usage, since the daemon started.
-   *
-   * Deliberately not token counts. Neither model reports them — laya answers with
-   * `answers`, `routing`, `latency_ms` and `device`, julia with `answers` alone — and a
-   * locally-run model bills nothing, so a number here would be a guess wearing a
-   * counter's clothes. What is worth knowing is how often the model is being used and how
-   * long it takes, because that is what says whether the idle window is doing its job.
+   * Completed calls since daemon start, including failures. Models do not report
+   * token counts; usage tracks calls, time, bytes, and answers instead.
    */
   calls: number
   /** Calls that ended in a `BackendError`. */
@@ -109,16 +70,8 @@ export interface Backend {
    */
   readonly toolPrefix?: string
   /**
-   * The tool names this backend exposes, without the product prefix. Must not load.
-   *
-   * Declared rather than discovered, because discovering it means starting the process,
-   * and starting the process is the one thing this project refuses to do on a path the
-   * agent did not ask for. `GET /catalog` reads this to hand the opencode plugin a tool
-   * surface at session start, which is the only reason it exists.
-   *
-   * A backend that answers `tools/list` from somewhere other than a child process —
-   * `systemone-http` synthesises its own list — reads it from there instead, so the
-   * contract is "the surface", not "the config".
+   * Tool names without the product prefix. `/catalog` reads these without loading
+   * a model. Use config declarations or a list generated locally by the adapter.
    */
   readonly tools: readonly string[]
   /**
@@ -129,13 +82,8 @@ export interface Backend {
    */
   call(ctx: CallContext): Promise<unknown>
   /**
-   * Release everything this backend holds, and wait until it is released.
-   *
-   * Idempotent, and — the part that is easy to get wrong — it must also settle any
-   * start that is in flight. A quiesce that returns while a cold load is still
-   * connecting hands the caller a daemon that believes it is stopped while a process
-   * is still coming up. Implementations are responsible for that, because only they
-   * know what they are waiting on.
+   * Release resources and settle any start in progress before returning.
+   * Must be idempotent; no child may appear after cleanup completes.
    */
   quiesce(): Promise<void>
   /** Status for `onesystem status` and `GET /health`. Must not load anything. */
@@ -143,11 +91,7 @@ export interface Backend {
 }
 
 /**
- * What the daemon depends on, rather than on how any backend works.
- *
- * Two adapters sit behind this (a local process, and somebody else's server), so the seam
- * is real by the two-adapter rule, and it is also the test surface: everything in the
- * daemon that is not a backend can be tested by handing it a port that is not one.
+ * Supervisor interface used by the daemon and HTTP layer; tests can supply a fake.
  */
 export interface BackendPort {
   /** Every enabled backend's name, in config order. */

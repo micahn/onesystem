@@ -1,23 +1,6 @@
 /**
- * Call accounting, and the invariant that depends on it.
- *
- * The invariant:
- *
- * > An aborted call must still release `inflight`, or the idle sweep skips that backend
- * > forever.
- *
- * It is the one the whole project turns on. The sweep skips any backend reporting
- * `inflight > 0`, so a leaked increment parks a backend at busy permanently — it is never
- * quiesced, never releases its VRAM, and tells a user who cancelled seconds ago that it is
- * working. No restart clears it short of killing the daemon.
- *
- * It used to be enforced by a bare `finally` typed out in each adapter, and the one test
- * named for it could not check it: `HangingBackend.describe()` returned a counter that
- * increments on every `describe()` call, and `FakeBackend` used `busy ? 1 : 0`. Three
- * mechanisms, none of them the accounting under test, and the test asserted only that the
- * call rejected. So the assertions below run against a real `StdioMcpBackend` — a real
- * child process, a real MCP handshake, a real cancellation — and against the ledger
- * itself, where the `finally` now lives.
+ * Cancellation must release inflight or idle shutdown cannot run. Check the real
+ * ledger and a real MCP child so fake accounting cannot hide a leaked count.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

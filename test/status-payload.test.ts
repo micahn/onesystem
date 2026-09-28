@@ -1,22 +1,6 @@
 /**
- * The `onesystem status --json` payload.
- *
- * This is a wire format with a reader and a writer on opposite sides of a process
- * boundary. `cli.ts` builds it, `plugin/discover.ts` parses it, and the plugin is what
- * registers the session's tools against the address in it. A field that stops being emitted
- * is not a compile error anywhere: the plugin reads `undefined`, `resolveBase` returns null,
- * and the session ends up with no tools and no message — which is the exact symptom that
- * `DaemonStatus` was introduced to prevent, arriving by the same route.
- *
- * `DaemonStatus` also moved modules during the `config.ts` split (it is a report type, so
- * it belongs in `health.ts`, and its presence in `config.ts` was the edge that closed a
- * three-module type cycle). A type moving is safe; a *payload* moving is not, and nothing
- * about the move would have been caught by a typecheck. So the key set is pinned here.
- *
- * The plugin-side half of the same risk is handled structurally rather than here:
- * `DaemonAnswer` is a `Pick<DaemonStatus, ...>`, so a renamed or dropped field is a
- * compile error. This test covers the half a type cannot: fields that are still declared
- * but no longer written.
+ * Check the JSON keys emitted by `onesystem status`. TypeScript can detect renamed
+ * types, but it cannot ensure fields survive serialization across the CLI/plugin boundary.
  */
 
 import { describe, expect, test } from "bun:test"

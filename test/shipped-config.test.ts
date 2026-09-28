@@ -1,22 +1,7 @@
 /**
- * The shipped config only sets environment variables that exist.
- *
- * `onesystem.config.jsonc` is the first thing a person copies, and it is the file they edit
- * when something hangs. So a variable in it that nothing reads is worse than a missing one:
- * it asserts a relationship that does not exist, and it is asserted in three places at once.
- *
- * That is not hypothetical. The shipped config set `JULIA_IDLE_UNLOAD_SECS` and
- * `JULIA_TOOL_TIMEOUT_SECS`, and a comment claimed the config's `requestTimeoutSecs`
- * "matches LAYA_TOOL_TIMEOUT_SECS in the shim". The julia shim read both variables into
- * module-level constants and then never used either: `TOOL_TIMEOUT_SECS` was assigned and
- * read nowhere in the file, and the `reap_if_idle` that was supposed to consume
- * `IDLE_UNLOAD_SECS` was defined and invoked nowhere in its 101 lines. Three places
- * asserting that a child enforces a per-call cap that no child enforced -- while the daemon
- * enforced it correctly, at `supervisor.ts`, which is the only place that ever did.
- *
- * The dead code is gone. This test is what keeps it gone, and it is the general form rather
- * than a one-off: it reads the shipped config, finds every variable it sets, and checks each
- * one against the source of the shim that backend actually spawns.
+ * Every environment variable in the template must be read by its backend.
+ * The supervisor owns idle shutdown and request timeouts; shims must not imply
+ * that unused variables enforce either policy.
  */
 
 import { describe, expect, test } from "bun:test"

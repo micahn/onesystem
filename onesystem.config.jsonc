@@ -1,26 +1,20 @@
-// Template config. Every path below is a placeholder, because the real ones depend on
-// your interpreter and your weights directory. Run `onesystem install <model>` to build a
-// runtime; it prints the exact block for your machine, and `onesystem use <model>` switches
-// this file to it.
-//
-// Full documentation is in README.md.
+// Template with placeholder paths. `onesystem install <model>` writes real paths
+// and enables the model. Use `onesystem use <model>` to switch. See README.md.
 
 {
   "host": "127.0.0.1",
   "port": 7331,
 
-  // Wind down after this long with no traffic. Long on purpose: a model load costs 20-54s
-  // and 3 GB of VRAM, so exiting sooner only moves that cost to the next session.
+  // Stop idle local backends after this many seconds. Avoid frequent cold loads.
   "idleShutdownSecs": 600,
 
-  // How often the idle check runs. A timestamp compare, so it can be cheap.
+  // Seconds between idle checks. Must not exceed idleShutdownSecs.
   "idleSweepSecs": 5,
 
-  // Ceiling on one forwarded call, enforced by the daemon. No child enforces this.
+  // Maximum seconds per forwarded call, enforced by the daemon.
   "requestTimeoutSecs": 120,
 
-  // Which model answers when the agent has not said. Ignored unless more than one backend
-  // is enabled. `tasks` is guidance the plugin logs, not dispatch.
+  // Default model for multiple enabled backends. `tasks` is logged guidance only.
   "routing": {
     "enabled": false,
     "default": "laya",
@@ -30,25 +24,20 @@
     }
   },
 
-  // Every `command` and `LAYA_PYTHON` below is a placeholder. `onesystem install laya`
-  // overwrites the laya block with real paths and enables it; you do not edit these by hand.
   "backends": {
     "laya": {
       "transport": "stdio-mcp",
       "command": ["/path/to/runtimes/laya/.venv/bin/laya-mcp-server"],
       "env": {
         "LAYA_DEVICE": "cuda",
-        // 0 means laya loads a checkpoint on first use rather than at startup. This is what
-        // keeps the model out of VRAM until a request actually asks for it.
+        // Load weights on first use.
         "LAYA_PRELOAD": "0",
-        // Set here rather than in your shell: the daemon inherits nothing from the session
-        // that started it.
+        // Set the interpreter here so all sessions use the same runtime.
         "LAYA_PYTHON": "/home/you/.local/share/onesystem/runtimes/laya/.venv/bin/python"
       },
-      // Generous because laya is silent for ~30s importing transformers before it binds stdio.
+      // Allow time to import transformers before the MCP handshake.
       "startupTimeoutSecs": 180,
-      // This backend's tool names, without the `laya_` prefix. Declared by hand because
-      // reading them from the process would load the model at session start.
+      // Names without `laya_`. Declaring them avoids starting the model to list tools.
       "tools": [
         "predict",
         "status",
@@ -77,7 +66,7 @@
       "enabled": false
     },
 
-    // An already-running service speaking POST /v1/systemone. onesystem does not start it.
+    // Existing POST /v1/systemone service. Start it separately.
     "rev": {
       "transport": "systemone-http",
       "baseUrl": "http://127.0.0.1:8000",
