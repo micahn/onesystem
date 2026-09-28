@@ -23,7 +23,7 @@
 
 import type { SystemOneBackend } from "../config.ts"
 import { describeError, startDeadline } from "../async.ts"
-import { emptyUsage, record } from "./usage.ts"
+import { CallLedger } from "./usage.ts"
 import { logger } from "../log.ts"
 import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
@@ -43,15 +43,20 @@ export class SystemOneBackendImpl implements Backend {
   /** A remote service is always "warm": there is nothing local to start or hold. */
   #state: BackendState = "warm"
   #reachable: boolean | null = null
-  #lastActivityAt = Date.now()
-  #inflight = 0
-  #usage = emptyUsage()
+  /**
+   * The per-call ceremony, in one place, for the same reason the local adapter has one:
+   * `inflight` above zero makes the idle sweep skip this backend forever, and the release
+   * that brings it back down has to exist in exactly one place. See `CallLedger`.
+   */
+  #ledger: CallLedger
 
   constructor(
     readonly name: string,
     private readonly spec: SystemOneBackend,
     private readonly deps: { fetch?: FetchLike; now?: () => number } = {},
-  ) {}
+  ) {
+    this.#ledger = new CallLedger(() => this.#now())
+  }
 
   #now(): number {
     return (this.deps.now ?? Date.now)()
@@ -82,7 +87,10 @@ export class SystemOneBackendImpl implements Backend {
 
   /** No-op, and not merely because it is cheap: there is no process to own. */
   async start(): Promise<void> {
-    this.#lastActivityAt = this.#now()
+    // Not a call, so it gets no duration and no `inflight` — but it is activity, and an
+    // `idleMs` still counting from before a start would report a backend as due for
+    // release the moment it came up.
+    this.#ledger.touch()
   }
 
   async quiesce(): Promise<void> {
@@ -90,91 +98,95 @@ export class SystemOneBackendImpl implements Backend {
     // is exempt from the idle sweep; see BackendStatus#local.
   }
 
-  call(ctx: CallContext): Promise<unknown> {
-    // Wrapped rather than awaited, so one place times the whole call including the
-    // unsupported-method and unknown-tool rejections above, which are errors the user sees.
-    return record(this.#usage, () => this.#doCall(ctx), () => this.#now(), ctx.params)
-  }
+  async call(ctx: CallContext): Promise<unknown> {
+    // The tool surface is this adapter's own business, so it is answered here rather than
+    // in the supervisor: special-casing it one layer up meant the request path had a branch
+    // that only applied to one transport, and a third transport would have needed a fourth
+    // edit in a module with no reason to know any of them.
+    //
+    // All of it is above the tracked region, and that is a change of behaviour worth naming.
+    // `tools/list` and a rejected method or unknown tool never reach the model, so counting
+    // them as calls gave them a duration and an error count for work that did not happen.
+    // The local model already behaved this way — its `call` rejected an unsupported method
+    // before `inflight++` — so this is the http adapter being made to match, not a new rule.
+    if (ctx.method === "tools/list") return systemoneToolList()
+    if (ctx.method !== "tools/call") {
+      throw new BackendError(this.name, `method not supported by the systemone adapter: ${ctx.method}`)
+    }
+    const name = (ctx.params as { name?: unknown } | undefined)?.name
+    if (name !== "systemone") {
+      throw new BackendError(this.name, `unknown tool: ${String(name)}`)
+    }
+    const body = (ctx.params as { arguments?: unknown }).arguments
 
-  async #doCall(ctx: CallContext): Promise<unknown> {
-    this.#inflight++
-    this.#lastActivityAt = this.#now()
     try {
-      // Answered here, not in the supervisor. The tool surface is this adapter's own
-      // business, and special-casing it one layer up meant the request path had a branch
-      // that only applied to one transport — a third transport would need a fourth edit
-      // in a module that has no reason to know any of them.
-      if (ctx.method === "tools/list") {
-        return systemoneToolList()
-      }
-      if (ctx.method !== "tools/call") {
-        throw new BackendError(this.name, `method not supported by the systemone adapter: ${ctx.method}`)
-      }
-      const name = (ctx.params as { name?: unknown } | undefined)?.name
-      if (name !== "systemone") {
-        throw new BackendError(this.name, `unknown tool: ${String(name)}`)
-      }
-      const body = (ctx.params as { arguments?: unknown }).arguments
-
-      const url = `${this.spec.baseUrl}/v1/systemone`
-      const timeoutMs = ctx.timeoutMs ?? (this.spec.startupTimeoutSecs ?? 30) * 1000
-      const doFetch = this.deps.fetch ?? ((input, init) => fetch(input, init))
-      const body_text = JSON.stringify(body ?? {})
-
-      // The deadline and the caller's signal both have to reach fetch, and they are two
-      // separate aborts. The old code took `ctx.signal ?? controller.signal`, which meant
-      // that supplying a caller signal silently discarded the timeout — a branch that
-      // read as a merge and behaved as a replacement.
-      const deadline = startDeadline(timeoutMs)
-      const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline.signal]) : deadline.signal
-
-      try {
-        const res = await doFetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: body_text,
-          signal,
-        })
-        const text = await res.text()
-        if (!res.ok) {
-          throw new BackendError(this.name, `${url} returned ${res.status}: ${text.slice(0, 300)}`)
-        }
-        this.#reachable = true
-        // MCP tool results are content blocks, so wrap the untouched body. The body
-        // itself is passed through verbatim in both directions.
-        return { content: [{ type: "text", text }] }
-      } catch (err) {
-        if (deadline.timedOut()) {
-          throw new BackendError(this.name, `POST ${url} exceeded ${timeoutMs}ms`, err)
-        }
-        if (ctx.signal?.aborted) {
-          throw new BackendError(this.name, `POST ${url} was cancelled`, err)
-        }
-        throw err
-      } finally {
-        deadline.dispose()
-      }
+      return await this.#ledger.track(() => this.#forward(ctx, body), ctx.params)
     } catch (err) {
       this.#reachable = false
       if (err instanceof BackendError) throw err
       throw new BackendError(this.name, `forward failed: ${describeError(err)}`, err)
-    } finally {
-      this.#inflight--
-      this.#lastActivityAt = this.#now()
     }
   }
 
-  describe(): BackendStatus & { baseUrl: string; reachable: boolean | null } {
+  async #forward(ctx: CallContext, body: unknown): Promise<unknown> {
+    const url = `${this.spec.baseUrl}/v1/systemone`
+    const timeoutMs = ctx.timeoutMs ?? (this.spec.startupTimeoutSecs ?? 30) * 1000
+    const doFetch = this.deps.fetch ?? ((input, init) => fetch(input, init))
+    const body_text = JSON.stringify(body ?? {})
+
+    // The deadline and the caller's signal both have to reach fetch, and they are two
+    // separate aborts. The old code took `ctx.signal ?? controller.signal`, which meant
+    // that supplying a caller signal silently discarded the timeout — a branch that
+    // read as a merge and behaved as a replacement.
+    const deadline = startDeadline(timeoutMs)
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline.signal]) : deadline.signal
+
+    try {
+      const res = await doFetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body_text,
+        signal,
+      })
+      const text = await res.text()
+      if (!res.ok) {
+        throw new BackendError(this.name, `${url} returned ${res.status}: ${text.slice(0, 300)}`)
+      }
+      this.#reachable = true
+      // MCP tool results are content blocks, so wrap the untouched body. The body itself
+      // is passed through verbatim in both directions.
+      return { content: [{ type: "text", text }] }
+    } catch (err) {
+      if (deadline.timedOut()) {
+        throw new BackendError(this.name, `POST ${url} exceeded ${timeoutMs}ms`, err)
+      }
+      if (ctx.signal?.aborted) {
+        throw new BackendError(this.name, `POST ${url} was cancelled`, err)
+      }
+      throw err
+    } finally {
+      deadline.dispose()
+    }
+  }
+
+  /**
+   * The read-only view, and only the read-only view.
+   *
+   * This widened the return type with `& { baseUrl; reachable }`, and nothing read either:
+   * `baseUrl` is in the config the adapter was built from, and `reachable` is a private
+   * field set on the request path. `reachable` is still tracked — it is what tells a
+   * future reader whether the failure above was the model or the network — it is just no
+   * longer published on a read that structurally nobody could use.
+   */
+  describe(): BackendStatus {
     return {
       name: this.name,
       transport: this.transport,
       state: this.#state,
       local: false,
-      inflight: this.#inflight,
-      idleMs: this.#now() - this.#lastActivityAt,
-      ...this.#usage,
-      baseUrl: this.spec.baseUrl,
-      reachable: this.#reachable,
+      inflight: this.#ledger.inflight,
+      idleMs: this.#now() - this.#ledger.lastActivityAt,
+      ...this.#ledger.usage,
     }
   }
 }

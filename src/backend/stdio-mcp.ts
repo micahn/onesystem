@@ -46,7 +46,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import type { StdioBackend } from "../config.ts"
 import { describeError } from "../async.ts"
-import { emptyUsage, record } from "./usage.ts"
+import { CallLedger } from "./usage.ts"
 import { logger } from "../log.ts"
 import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
@@ -85,9 +85,15 @@ export class StdioMcpBackend implements Backend {
   #state: BackendState = "cold"
   #client: Client | null = null
   #starting: Promise<void> | null = null
-  #lastActivityAt = Date.now()
-  #inflight = 0
-  #usage = emptyUsage()
+  /**
+   * The per-call ceremony, in one place.
+   *
+   * It was three fields on this class — `#lastActivityAt`, `#inflight`, `#usage` — with the
+   * increment and the release typed out by hand around the request. `inflight` in
+   * particular is not bookkeeping: the idle sweep skips any backend above zero, so a leak
+   * parks this backend at busy forever and it never releases its VRAM. See `CallLedger`.
+   */
+  #ledger: CallLedger
   /**
    * Bumped by every quiesce. A start that began under an older generation is stale, and
    * must tear its own child down rather than publish it.
@@ -98,7 +104,11 @@ export class StdioMcpBackend implements Backend {
     readonly name: string,
     private readonly spec: StdioBackend,
     private readonly deps: { now?: () => number } = {},
-  ) {}
+  ) {
+    // `() => this.#now()`, not `this.#now` — a bare method reference loses its receiver and
+    // the failure is a `this is undefined` thrown from inside the clock.
+    this.#ledger = new CallLedger(() => this.#now())
+  }
 
   #now(): number {
     return (this.deps.now ?? Date.now)()
@@ -130,7 +140,7 @@ export class StdioMcpBackend implements Backend {
     if (this.#starting) return this.#starting
 
     this.#state = "starting"
-    this.#lastActivityAt = this.#now()
+    this.#ledger.touch()
     const generation = this.#generation
     this.#starting = this.#doStart(generation).finally(() => {
       this.#starting = null
@@ -180,7 +190,7 @@ export class StdioMcpBackend implements Backend {
 
     this.#client = client
     this.#state = "warm"
-    this.#lastActivityAt = this.#now()
+    this.#ledger.touch()
     log.info("warm", { startupMs: this.#now() - started })
   }
 
@@ -225,45 +235,54 @@ export class StdioMcpBackend implements Backend {
           `(supported: ${Object.keys(RESULT_SCHEMAS).join(", ")})`,
       )
     }
-    await this.start()
-    const client = this.#client
-    if (!client) throw new BackendError(this.name, "backend is not connected")
-
-    this.#inflight++
-    this.#lastActivityAt = this.#now()
+    // Validation above, accounting below. A method this transport cannot serve never
+    // reaches the model, so it is not a call and gets no duration and no error count.
     try {
-      return await record(this.#usage, () => client.request(
-        { method, params: ctx.params ?? {} } as never,
-        schema as never,
-        // Both halves of the deadline. The signal is what actually cancels; the timeout
-        // is what stops the SDK applying its own 60s default, which is shorter than the
-        // 120s onesystem is configured for.
-        { signal: ctx.signal, timeout: ctx.timeoutMs },
-      ), () => this.#now(), ctx.params)
+      return await this.#ledger.track(async () => {
+        // The cold start is inside the tracked region. It is 20-54s, it is the largest
+        // thing `lastMs` will ever report for a local model, and leaving it out is exactly
+        // what let `BackendStatus.lastMs` mean end-to-end for a remote backend and
+        // inference-only for this one — same field, two meanings, decided by which adapter
+        // the reader happened to be looking at. `CallLedger` exists so that a third
+        // transport cannot reintroduce the difference.
+        await this.start()
+        const client = this.#client
+        if (!client) throw new BackendError(this.name, "backend is not connected")
+        return client.request(
+          { method, params: ctx.params ?? {} } as never,
+          schema as never,
+          // Both halves of the deadline. The signal is what actually cancels; the timeout
+          // is what stops the SDK applying its own 60s default, which is shorter than the
+          // 120s onesystem is configured for.
+          { signal: ctx.signal, timeout: ctx.timeoutMs },
+        )
+      }, ctx.params)
     } catch (err) {
       if (ctx.signal?.aborted) {
         throw new BackendError(this.name, `${ctx.method} was cancelled: ${describeError(err)}`, err)
       }
       throw new BackendError(this.name, `${ctx.method} failed: ${describeError(err)}`, err)
-    } finally {
-      // The `finally` is what makes an aborted call releasable. Without it, a cancelled
-      // call leaves `inflight` above zero and the idle sweep skips this backend forever.
-      this.#inflight--
-      this.#lastActivityAt = this.#now()
     }
   }
 
-  describe(): BackendStatus & { command: string; generation: number } {
+  /**
+   * The read-only view, and only the read-only view.
+   *
+   * This used to widen the return type with `& { command; generation }`. Nothing read
+   * either: `command` is available from the config and `generation` is the internal counter
+   * of the stop/start race fix, published on a public read and then structurally
+   * unreachable from anywhere. It is a private field now, which is what it always was in
+   * substance.
+   */
+  describe(): BackendStatus {
     return {
       name: this.name,
       transport: this.transport,
       state: this.#state,
       local: true,
-      inflight: this.#inflight,
-      idleMs: this.#now() - this.#lastActivityAt,
-      ...this.#usage,
-      command: this.spec.command.join(" "),
-      generation: this.#generation,
+      inflight: this.#ledger.inflight,
+      idleMs: this.#now() - this.#ledger.lastActivityAt,
+      ...this.#ledger.usage,
     }
   }
 }
