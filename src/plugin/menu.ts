@@ -3,7 +3,7 @@
  * labels, and value validation are testable without a terminal or a Solid renderer.
  */
 
-import type { Config } from "../config.ts"
+import type { ConfigProbe } from "../config.ts"
 import { MODELS } from "../models.ts"
 import { backendStates } from "../config-edit.ts"
 import { SETTING_BOUNDS, type NumericSetting } from "../config-edit.ts"
@@ -30,6 +30,7 @@ export function normalizeSettings(raw: unknown): PluginSettings {
 export type MenuValue =
   | "status"
   | "restart"
+  | "config:repair"
   | `model:${string}`
   | `install:${string}`
   | `setting:${NumericSetting}`
@@ -85,14 +86,33 @@ export function commandLayer(open: () => void): () => CommandLayer {
 /**
  * One flat list with categories rather than nested dialogs: the whole thing is one
  * screen, and the categories are what make it readable.
+ *
+ * Takes a probe, not a config, because a config that will not load has to be something
+ * the menu talks about. Reading it the other way round made a broken file indistinguishable
+ * from no file: the model rows quietly disappeared and the menu read as though nothing
+ * was installed.
  */
-export function topMenu(config: Config | null, settings: PluginSettings): MenuOption[] {
-  const opts: MenuOption[] = [
+export function topMenu(probe: ConfigProbe, settings: PluginSettings): MenuOption[] {
+  const config = probe.config
+  const opts: MenuOption[] = []
+
+  if (probe.problems.length > 0) {
+    const fixable = probe.problems.filter((p) => p.fix).length
+    opts.push({
+      title: `Config problem${probe.problems.length > 1 ? "s" : ""}: ${probe.problems.length}`,
+      value: "config:repair",
+      description: fixable
+        ? `${fixable} of them fixable; open to repair`
+        : "open to read; needs a hand",
+    })
+  }
+
+  opts.push(
     { title: "Show status", value: "status", description: "daemon, models and device" },
     { title: "Restart daemon", value: "restart", description: "reloads models; drops warm ones" },
-  ]
+  )
 
-  // Without a config there is nothing to toggle, and the install path writes it first.
+  // Nothing to toggle until there is a config that loads, and the install path writes one.
   if (config) {
     for (const { name, enabled } of backendStates(config)) {
       opts.push({

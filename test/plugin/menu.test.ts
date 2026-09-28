@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { loadConfig, validate } from "../../src/config.ts"
+import { loadConfig, validate, type Config, type ConfigProblem } from "../../src/config.ts"
 import { SETTING_BOUNDS, setBackendEnabled, setSetting } from "../../src/config-edit.ts"
 import {
   DEFAULT_SETTINGS,
@@ -25,6 +25,14 @@ import { MODELS } from "../../src/models.ts"
 
 const config = (backends: Record<string, unknown>, extra = {}) => validate({ backends, ...extra }, "test")
 
+/** What probeConfig returns for a config that loads, and for one that does not. */
+const probe = (cfg?: Config, problems: ConfigProblem[] = []) => ({
+  path: "/home/u/.config/onesystem/onesystem.jsonc",
+  address: { host: "127.0.0.1", port: cfg?.port ?? 7331 },
+  problems,
+  config: cfg,
+})
+
 const values = (opts: { value: MenuValue }[]) => opts.map((o) => o.value)
 const categories = (opts: { category?: string }[]) => [...new Set(opts.map((o) => o.category ?? ""))]
 
@@ -35,7 +43,7 @@ describe("the menu", () => {
   })
 
   test("it offers status, restart, both models, and both settings", () => {
-    const v = values(topMenu(full, DEFAULT_SETTINGS))
+    const v = values(topMenu(probe(full), DEFAULT_SETTINGS))
     expect(v).toContain("status")
     expect(v).toContain("restart")
     expect(v).toContain("model:laya")
@@ -47,7 +55,7 @@ describe("the menu", () => {
   })
 
   test("a toggle says which way it will go", () => {
-    const opts = topMenu(full, DEFAULT_SETTINGS)
+    const opts = topMenu(probe(full), DEFAULT_SETTINGS)
     const laya = opts.find((o) => o.value === "model:laya")!
     const julia = opts.find((o) => o.value === "model:julia")!
     // laya is enabled, so the action offered is to disable it. Getting this backwards is
@@ -57,7 +65,7 @@ describe("the menu", () => {
   })
 
   test("every installable model is offered", () => {
-    const v = values(topMenu(full, DEFAULT_SETTINGS))
+    const v = values(topMenu(probe(full), DEFAULT_SETTINGS))
     for (const m of MODELS) expect(v).toContain(`install:${m.name}`)
   })
 
@@ -66,7 +74,7 @@ describe("the menu", () => {
       { laya: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"] } },
       { port: 7999, idleShutdownSecs: 120 },
     )
-    const opts = topMenu(c, { pollMs: 10_000, showCard: false })
+    const opts = topMenu(probe(c), { pollMs: 10_000, showCard: false })
     expect(opts.find((o) => o.value === "setting:port")!.title).toBe("Daemon port: 7999")
     expect(opts.find((o) => o.value === "setting:idleShutdownSecs")!.title).toBe("Idle window: 120s")
     expect(opts.find((o) => o.value === "setting:pollMs")!.title).toBe("Poll interval: 10s")
@@ -75,13 +83,13 @@ describe("the menu", () => {
 
   test("one flat list, grouped by category", () => {
     // Nested dialogs would make a routine toggle three keystrokes deep.
-    const opts = topMenu(full, DEFAULT_SETTINGS)
+    const opts = topMenu(probe(full), DEFAULT_SETTINGS)
     expect(categories(opts)).toEqual(["", "Models", "Install", "Settings"])
   })
 
   test("with no config there is nothing to toggle, and the menu still works", () => {
     // The install path writes the first config, so a first run must not be a dead menu.
-    const v = values(topMenu(null, DEFAULT_SETTINGS))
+    const v = values(topMenu(probe(), DEFAULT_SETTINGS))
     expect(v).toEqual(
       expect.arrayContaining(["status", "restart", "install:laya", "setting:pollMs"]),
     )
@@ -89,18 +97,63 @@ describe("the menu", () => {
     expect(v.some((x) => x.startsWith("setting:port"))).toBe(false)
   })
 
+  test("a config that will not load is the first row, not a silent omission", () => {
+    // The bug: a broken config was read as no config, so the model rows vanished and the
+    // menu read as though nothing was installed. The failure has to name itself.
+    const broken = probe(undefined, [
+      { message: "backends.laya.startupTimeoutSecs (180) exceeds requestTimeoutSecs (120)", fix: { key: "requestTimeoutSecs", value: 180 } },
+    ])
+    const opts = topMenu(broken, DEFAULT_SETTINGS)
+    expect(opts[0]!.value).toBe("config:repair")
+    expect(opts[0]!.title).toBe("Config problem: 1")
+    expect(opts[0]!.description).toContain("fixable")
+    // And it is the only thing ahead of the ordinary rows, so it cannot be missed.
+    expect(opts[1]!.value).toBe("status")
+  })
+
+  test("a problem with no fix says so rather than promising a repair", () => {
+    const broken = probe(undefined, [{ message: "invalid JSON at offset 17" }])
+    const row = topMenu(broken, DEFAULT_SETTINGS)[0]!
+    expect(row.value).toBe("config:repair")
+    expect(row.description).toBe("open to read; needs a hand")
+  })
+
+  test("several problems are counted, and the count is right", () => {
+    const broken = probe(undefined, [
+      { message: "a", fix: { key: "requestTimeoutSecs", value: 180 } },
+      { message: "b" },
+    ])
+    const row = topMenu(broken, DEFAULT_SETTINGS)[0]!
+    expect(row.title).toBe("Config problems: 2")
+    expect(row.description).toContain("1 of them fixable")
+  })
+
+  test("a broken config still leaves the rest of the menu usable", () => {
+    // Not a dead end: install, status and restart do not need a config that loads.
+    const broken = probe(undefined, [{ message: "broken" }])
+    const v = values(topMenu(broken, DEFAULT_SETTINGS))
+    expect(v).toEqual(expect.arrayContaining(["config:repair", "status", "restart", "install:laya"]))
+    // Toggling a model still needs a config, so those stay hidden.
+    expect(v.some((x) => x.startsWith("model:"))).toBe(false)
+  })
+
+  test("a valid config shows no problem row at all", () => {
+    expect(values(topMenu(probe(full), DEFAULT_SETTINGS))).not.toContain("config:repair")
+  })
+
   test("every value is one the dialog routes", () => {
     // A value with no handler is a dead row, and dead rows are the whole complaint.
     const known = new Set<MenuValue>([
       "status",
       "restart",
+      "config:repair",
       "setting:pollMs",
       "setting:showCard",
       ...MODELS.map((m) => `install:${m.name}` as const),
       ...Object.keys(SETTING_BOUNDS).map((k) => `setting:${k}` as MenuValue),
       ...["laya", "julia"].map((n) => `model:${n}` as MenuValue),
     ])
-    for (const v of values(topMenu(full, DEFAULT_SETTINGS))) {
+    for (const v of values(topMenu(probe(full), DEFAULT_SETTINGS))) {
       expect(`${v}: ${known.has(v)}`).toBe(`${v}: true`)
     }
   })
@@ -274,5 +327,38 @@ describe("the /onesystem command", () => {
     // A duplicate `/onesystem` would shadow the first one, or show twice in completion.
     expect(tui).not.toContain('slash: { name: "onesystem"')
     expect(tui).not.toContain("onesystem.menu")
+  })
+})
+
+describe("the repair handler", () => {
+  const tui = () => readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+
+  test("config:repair is routed, and the row is not dead", async () => {
+    // The original complaint about this menu was rows that did nothing. Every value the
+    // menu can produce has to be handled, and this one is the newest.
+    const src = await tui()
+    expect(src).toContain('choice === "config:repair"')
+    expect(src).toContain("await repair(probe)")
+  })
+
+  test("it uses the same repair doctor --fix applies", async () => {
+    // Two implementations of "fix the config" would drift, and the menu is the one a user
+    // is looking at when they discover the problem.
+    const src = await tui()
+    expect(src).toContain("repairConfig(probe.path, probe.problems)")
+  })
+
+  test("it writes only after a confirmation, and re-checks afterwards", async () => {
+    const src = await tui()
+    expect(src.indexOf("ctx.ui.dialog.confirm")).toBeLessThan(src.indexOf("await repairConfig("))
+    // Reporting success without re-reading would claim a repair that did not happen.
+    expect(src).toContain("const after = await probeConfig()")
+  })
+
+  test("the menu probes the config rather than loading it", async () => {
+    // loadConfig throws, which is exactly what this is fixing.
+    const src = await tui()
+    expect(src).toContain("await probeConfig()")
+    expect(src).not.toContain("loadConfig().then")
   })
 })

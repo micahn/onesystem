@@ -10,10 +10,11 @@ import { createEffect, createSignal } from "solid-js"
 import { jsx } from "@opentui/solid/jsx-runtime"
 import { probeHealth, type HealthReport } from "../health.ts"
 import type { BackendStatus } from "../backend/types.ts"
-import { loadConfig } from "../config.ts"
+import { loadConfig, probeConfig, type ConfigProbe } from "../config.ts"
 import {
   SETTING_BOUNDS,
   backendStates,
+  repairConfig,
   setBackendEnabled,
   setSetting,
   switchToBackend,
@@ -338,19 +339,69 @@ export default Plugin.define({
     }
 
     /**
+     * Show what is wrong with the config and offer the same repair `doctor --fix` applies.
+     *
+     * A dialog for the reading, then a confirmation for the writing. Confirming because the
+     * write is to the user's file and a menu is a worse place to be surprised by that than
+     * a terminal.
+     */
+    const repair = async (probe: ConfigProbe) => {
+      const lines = probe.problems.map((p) => `${p.message}\n${p.fix ? `  fixable: ${p.fix.key} = ${p.fix.value}` : "  needs a hand"}`)
+      await ctx.ui.dialog.alert({
+        title: `Config problem${probe.problems.length > 1 ? "s" : ""}`,
+        message: lines.join("\n\n"),
+      })
+      const fixable = probe.problems.filter((p) => p.fix)
+      if (fixable.length === 0) {
+        ctx.ui.toast.show({
+          title: "nothing to repair automatically",
+          message: `${probe.path} needs a hand. \`onesystem doctor\` shows the same.`,
+          variant: "warning",
+        })
+        return
+      }
+      const ok = await ctx.ui.dialog.confirm({
+        title: "Repair the config?",
+        message: `Set ${fixable.map((p) => `${p.fix!.key} = ${p.fix!.value}`).join(", ")} in ${probe.path}. Only the values that are wrong; comments and everything else are left alone.`,
+        label: { confirm: "Repair", cancel: "Cancel" },
+      })
+      if (!ok) return
+
+      try {
+        const result = await repairConfig(probe.path, probe.problems)
+        const after = await probeConfig()
+        if (after.problems.length === 0) {
+          ctx.ui.toast.show({ message: `config repaired: ${result.applied.join(", ")}`, variant: "success" })
+          return
+        }
+        ctx.ui.toast.show({
+          title: "still not loading",
+          message: after.problems[0]!.message,
+          variant: "error",
+        })
+      } catch (err) {
+        ctx.ui.toast.show({ title: "could not write the config", message: describeError(err), variant: "error" })
+      }
+    }
+
+    /**
      * /onesystem: status, model install and toggles, and settings.
      */
     const menu = async () => {
-      const config = await loadConfig().then(
-        (r) => r.config,
-        // No config yet: the install path writes one, so the menu can still work.
-        () => null,
-      )
+      // Probed, not loaded: a config that will not load is something this menu has to
+      // be able to talk about, and loadConfig throwing is what used to hide it.
+      const probe = await probeConfig()
+      const config = probe.config
       const choice = await ctx.ui.dialog.select<MenuValue>({
         title: "onesystem",
-        options: topMenu(config, normalizeSettings(settings)),
+        options: topMenu(probe, normalizeSettings(settings)),
       })
       if (!choice) return
+
+      if (choice === "config:repair") {
+        await repair(probe)
+        return
+      }
 
       if (choice === "status") {
         // Use the same snapshot as the card.

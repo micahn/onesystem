@@ -269,9 +269,20 @@ ok "dependencies installed"
 
 stage "Config"
 
+CONFIG_OK=1
 if [[ -f "$CONFIG" ]]; then
-  ok "already there: $CONFIG"
-  note "  'onesystem install' updates model paths."
+  # A config that will not load stops every command, so check it rather than assume.
+  # `status` loads the config and loads no model, and exits 2 only when the config is
+  # unreadable; its stderr already names the command that repairs it.
+  if problem=$(bun run src/cli.ts status 2>&1 >/dev/null); then
+    ok "already there: $CONFIG"
+    note "  'onesystem install' updates model paths."
+  else
+    CONFIG_OK=0
+    warn "$CONFIG will not load:"
+    printf '%s\n' "$problem" | sed 's/^/    /'
+    SKIPPED+=("repair it: bun run src/cli.ts doctor --fix")
+  fi
 else
   mkdir -p "$CONFIG_DIR"
   cp onesystem.config.jsonc "$CONFIG"
@@ -286,43 +297,50 @@ stage "Model"
 INSTALLED=$(bun run src/cli.ts runtimes 2>/dev/null | awk '$2 == "ok" { print $1 }' || true)
 [[ -n "$INSTALLED" ]] && ok "already installed: $(tr '\n' ' ' <<<"$INSTALLED")"
 
-SELECTED=()
-if [[ -n "$MODEL" ]]; then
-  parse_models "$MODEL"
-elif [[ -z "$INSTALLED" ]]; then
-  ask_models
-fi
-
-# Already-present models are reported, not rebuilt.
-WANTED=()
-LAST=""
-for m in "${SELECTED[@]}"; do
-  if grep -qx "$m" <<<"$INSTALLED"; then
-    ok "$m is already installed"
-  else
-    WANTED+=("$m")
-    LAST="$m"
-  fi
-done
-
-if (( ${#WANTED[@]} )); then
-  note "Downloads PyTorch and builds a runtime per model. Several GB each, several minutes."
-  for m in "${WANTED[@]}"; do
-    bun run src/cli.ts install "$m" || die "install $m failed"
-    ok "$m installed and configured"
-    DONE+=("model: $m")
-  done
-  # install enables what it installs and turns the rest off, so the last one wins.
-  note "enabled: $LAST  (onesystem use <model> to switch)"
-  INSTALLED="${WANTED[*]}"
-elif (( ! ${#SELECTED[@]} )); then
-  if [[ -z "$INSTALLED" ]]; then
-    note "no model installed. The plugin registers; its tools stay absent until you do."
-    SKIPPED+=("install a model: bun run src/cli.ts install laya")
-    [[ -t 0 ]] || SKIPPED+=("or set ONESYSTEM_MODEL=laya before running the installer")
-  fi
+# Installing a runtime builds it, downloads weights, and only then writes the config, so
+# a config that will not load would spend several GB and fail at the last step.
+if (( ! CONFIG_OK )); then
+  note "not installing a model: the config has to load before one can be written."
+  INSTALLED=""
 else
-  note "nothing to install"
+  SELECTED=()
+  if [[ -n "$MODEL" ]]; then
+    parse_models "$MODEL"
+  elif [[ -z "$INSTALLED" ]]; then
+    ask_models
+  fi
+
+  # Already-present models are reported, not rebuilt.
+  WANTED=()
+  LAST=""
+  for m in "${SELECTED[@]}"; do
+    if grep -qx "$m" <<<"$INSTALLED"; then
+      ok "$m is already installed"
+    else
+      WANTED+=("$m")
+      LAST="$m"
+    fi
+  done
+
+  if (( ${#WANTED[@]} )); then
+    note "Downloads PyTorch and builds a runtime per model. Several GB each, several minutes."
+    for m in "${WANTED[@]}"; do
+      bun run src/cli.ts install "$m" || die "install $m failed"
+      ok "$m installed and configured"
+      DONE+=("model: $m")
+    done
+    # install enables what it installs and turns the rest off, so the last one wins.
+    note "enabled: $LAST  (onesystem use <model> to switch)"
+    INSTALLED="${WANTED[*]}"
+  elif (( ! ${#SELECTED[@]} )); then
+    if [[ -z "$INSTALLED" ]]; then
+      note "no model installed. The plugin registers; its tools stay absent until you do."
+      SKIPPED+=("install a model: bun run src/cli.ts install laya")
+      [[ -t 0 ]] || SKIPPED+=("or set ONESYSTEM_MODEL=laya before running the installer")
+    fi
+  else
+    note "nothing to install"
+  fi
 fi
 
 stage "opencode plugin"

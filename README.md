@@ -82,6 +82,12 @@ onesystem doctor --fix    # apply the repairs, then re-check
 problem nobody can decide for you is reported and left alone, so it is safe to run on a
 file you care about.
 
+The same repair is the first row of the `/onesystem` menu when the config will not load,
+so the failure can be found and fixed without leaving OpenCode. The installer checks an
+existing config too, and skips installing a model when the config is broken — building a
+runtime and downloading its weights only to fail at the last step, when the config is
+written, would cost several GB for nothing.
+
 `stop` also reads leniently. A config problem in a backend you cannot reach must not stop
 you killing the daemon.
 
