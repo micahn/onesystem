@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { formatUsage, statusLine, statusReport } from "../src/plugin/tui.ts"
+import { cardRows, daemonView, formatUsage, statusLine, statusReport } from "../src/plugin/tui.ts"
 import { healthReport } from "../src/health.ts"
 import type { BackendStatus } from "../src/backend/types.ts"
 
@@ -186,5 +186,130 @@ describe("the usage line", () => {
     // 1024, and the test should say so rather than round in its favour.
     const out = formatUsage(backend({ inBytes: 10_000, outBytes: 90_000 }))
     expect(out).toContain("97.7K")
+  })
+})
+
+/**
+ * The card, and whether it agrees with the other two renderers.
+ *
+ * The sidebar had no test at all: `setup` was never invoked by any test, so roughly 230 of
+ * this file's 405 lines had no seam, and the three exports that existed were exported *so
+ * a test could call them* — the module's testable interface and its risky interface were
+ * disjoint. `cardRows` is that seam. It is a pure function of the same `DaemonView` the
+ * footer and the dialog read, which is what makes "do they agree" a question with an
+ * answer rather than a coincidence.
+ */
+describe("the sidebar card", () => {
+  const text = (h: ReturnType<typeof report> | null, woundDown = false) =>
+    cardRows(daemonView(h, woundDown)).map((r) => r.text)
+  const flat = (h: ReturnType<typeof report> | null, woundDown = false) => text(h, woundDown).join("\n")
+
+  test("a remote backend is not counted as a model by any of the three renderers", () => {
+    // The disagreement the issue was written about, concretely. One local warm beside one
+    // remote cold: the footer filters on `local` and had a test calling the alternative "a
+    // lie", the card counted every backend, and the dialog filtered nothing. One report,
+    // three answers.
+    const h = report(
+      backend({ name: "laya", state: "warm" }),
+      backend({ name: "rev", transport: "systemone-http", local: false, state: "cold" }),
+    )
+
+    // Footer: names the one model.
+    expect(statusLine(h)).toEqual({ text: "onesystem: laya warm", tone: "success" })
+
+    // Card: the headline counted every backend, so this read `1/2 warm` — claiming half
+    // the GPU is held by a model, when one of the two is somebody else's server.
+    expect(flat(h)).toContain("onesystem  1/1 warm")
+    expect(flat(h)).not.toContain("1/2 warm")
+
+    // And the remote is still shown, just not as a model.
+    expect(flat(h)).toContain("rev cold (remote)")
+
+    // Dialog: listed, labelled, and the idle window says it does not apply to it.
+    const dialog = statusReport(h, "http://127.0.0.1:7331")
+    expect(dialog).toContain("rev  (remote)  cold")
+    expect(dialog).toContain("applies to local models only")
+  })
+
+  test("warm/n counts models in the card and matches what the footer says", () => {
+    const h = report(
+      backend({ name: "a", state: "warm" }),
+      backend({ name: "b", state: "cold" }),
+      backend({ name: "c", state: "warm" }),
+    )
+    // The footer summarises two and counts the rest; the card totals all three. The
+    // numbers have to be describing the same set of things.
+    expect(statusLine(h).text).toBe("onesystem: a warm, b cold +1")
+    expect(flat(h)).toContain("onesystem  2/3 warm")
+  })
+
+  test("a remote-only daemon says so in all three places rather than claiming a model", () => {
+    const h = report(backend({ name: "rev", transport: "systemone-http", local: false, state: "warm" }))
+    expect(statusLine(h)).toEqual({ text: "onesystem: up, no local model", tone: "info" })
+    // `1/1 warm` here would be the same lie, in the same words, in the other renderer.
+    expect(flat(h)).toContain("onesystem  0/0 warm")
+    expect(flat(h)).toContain("no local model — the GPU is free")
+    expect(statusReport(h, "http://127.0.0.1:7331")).toContain("no local model — nothing here holds the GPU")
+  })
+
+  test("absent and wound-down are distinguished by the card the way the footer does it", () => {
+    // The distinction is the whole reason `sawHealthy` exists, and it was written out
+    // three times. The card and the footer had the same two branches; only one of the
+    // three renderers was tested for it.
+    expect(text(null, false)).toEqual(["onesystem  not running"])
+    expect(cardRows(daemonView(null, false))[0]!.tone).toBe("error")
+    expect(statusLine(null, false).tone).toBe("error")
+
+    expect(flat(null, true)).toContain("idle, GPU released")
+    expect(flat(null, true)).toContain("next tool call restarts it")
+    expect(cardRows(daemonView(null, true))[0]!.tone).toBe("muted")
+    expect(statusLine(null, true).tone).toBe("info")
+    expect(statusReport(null, null, true)).toContain("wound itself down on the idle window")
+  })
+
+  test("a cold model's idle number never answers for a warm one", () => {
+    // The concrete bug in the card's idle arithmetic. It took the quietest *local*
+    // backend whatever state it was in, so a cold backend's `idleMs` -- measured from when
+    // it was registered, since it has never been called -- could be the minimum and would
+    // then answer for the warm model next to it. Here the warm model was last touched
+    // 590s into a 600s window, so it has 10s left; the cold one was registered 0.5s ago.
+    // The old card took the cold one's number and said 600s, understating by 590s the
+    // urgency of the one thing it exists to report.
+    const h = report(
+      backend({ name: "warm-one", state: "warm", idleMs: 590_000 }),
+      backend({ name: "cold-one", state: "cold", idleMs: 500 }),
+    )
+    expect(flat(h)).toContain("idle in 10s")
+    expect(flat(h)).not.toContain("winding down")
+  })
+
+  test("a model being called right now is not about to be released", () => {
+    // `inflight` is the sweep's fourth condition and the card ignored it. A backend in
+    // flight is the least likely thing in the system to be released in the next second.
+    const h = report(backend({ name: "busy", state: "warm", idleMs: 599_000, inflight: 2 }))
+    expect(flat(h)).not.toContain("winding down")
+    expect(flat(h)).not.toContain("idle in")
+  })
+
+  test("with nothing warm there is no countdown, because there is nothing to wind down", () => {
+    // `anyLocalWarm` already ships on the report for exactly this and the TUI never read
+    // it. A cold daemon was showing "winding down" for a backend that had never started.
+    const h = report(backend({ state: "cold", idleMs: 900_000 }))
+    expect(flat(h)).not.toContain("winding down")
+    expect(flat(h)).not.toContain("idle in")
+  })
+
+  test("the card's usage line is the same one the dialog's numbers come from", () => {
+    // `formatUsage` claimed to be shared by both and was not: the dialog laid out its own.
+    // They cannot be one function -- the dialog has the width for the in/out split and the
+    // question types -- so what is pinned here is that they read the same fields and sum
+    // to the same total, which is the part that can silently drift.
+    const b = backend({ calls: 7, answered: 7, inBytes: 2_048, outBytes: 1_024 })
+    const h = report(b)
+    expect(flat(h)).toContain("7 calls · 7 answered · 3.0K")
+    const dialog = statusReport(h, null)
+    expect(dialog).toContain("7 calls")
+    expect(dialog).toContain("7 answered")
+    expect(dialog).toContain("2.0K in / 1.0K out")
   })
 })
