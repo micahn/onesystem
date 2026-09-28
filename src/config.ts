@@ -21,6 +21,7 @@ import { join } from "node:path"
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import type { HealthReport } from "./health.ts"
 import type { Holder as LockHolder } from "./lock.ts"
+import type { RoutingConfig } from "./routing.ts"
 
 export type Transport = "stdio-mcp" | "systemone-http"
 
@@ -96,6 +97,14 @@ export interface Config {
   /** Ceiling on one forwarded MCP call. Mirrors LAYA_TOOL_TIMEOUT_SECS. */
   requestTimeoutSecs: number
   backends: Record<string, Backend & { enabled?: boolean }>
+  /**
+   * Which model answers when the agent has not said. See src/routing.ts.
+   *
+   * Optional and off unless `enabled` is true, and ignored entirely unless more than one
+   * backend is on — a routing config with a single model is not a degraded route, it is no
+   * route, and reading as active while doing nothing is worse than not existing.
+   */
+  routing?: RoutingConfig
 }
 
 export const DEFAULTS: Config = {
@@ -334,7 +343,32 @@ export function validate(raw: unknown, source: string): Config {
       DEFAULTS.requestTimeoutSecs,
     ),
     backends,
+    routing: readRouting(input.routing),
   }
+}
+
+/**
+ * Read the routing block, or omit it.
+ *
+ * Omitted rather than defaulted to `{enabled: false}` so that "no routing" and "routing
+ * explicitly off" are the same object, and `routing` stays undefined unless someone
+ * actually wrote one.
+ */
+function readRouting(raw: unknown): RoutingConfig | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined
+  const input = raw as Record<string, unknown>
+  const tasks: Record<string, string> = {}
+  if (typeof input.tasks === "object" && input.tasks !== null) {
+    for (const [task, model] of Object.entries(input.tasks as Record<string, unknown>)) {
+      if (typeof model === "string") tasks[task] = model
+    }
+  }
+  const out: RoutingConfig = {
+    enabled: input.enabled === true,
+    default: typeof input.default === "string" ? input.default : undefined,
+    tasks: Object.keys(tasks).length > 0 ? tasks : undefined,
+  }
+  return out.enabled || out.default || out.tasks ? out : undefined
 }
 
 /**
@@ -366,6 +400,8 @@ export interface DaemonStatus {
   /** What opencode should register, and under which names. */
   registrations: BackendRegistration[]
   idleShutdownSecs: number
+  /** Present only when the config declares one; omitted otherwise. */
+  routing?: RoutingConfig
 }
 
 export async function loadConfig(path?: string): Promise<{ config: Config; path: string }> {

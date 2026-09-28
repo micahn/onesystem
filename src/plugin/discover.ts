@@ -21,11 +21,14 @@ import { spawn } from "node:child_process"
 import { basename } from "node:path"
 import type { DaemonStatus } from "../config.ts"
 import { formatLine } from "../log.ts"
+import type { RoutingConfig } from "../routing.ts"
 
 export interface DaemonAnswer {
   /** Base URL the daemon answers on. */
   url: string
   registrations: { backend: string; serverName: string; toolPrefix?: string }[]
+  /** Present only when the config declares one. */
+  routing?: RoutingConfig
 }
 
 export function pluginLog(msg: string, extra?: Record<string, unknown>): void {
@@ -111,7 +114,7 @@ export async function askDaemon(command: string, args: string[]): Promise<Daemon
   try {
     const parsed = JSON.parse(out) as Partial<DaemonStatus>
     if (typeof parsed.url !== "string" || !Array.isArray(parsed.registrations)) return null
-    return { url: parsed.url, registrations: parsed.registrations }
+    return { url: parsed.url, registrations: parsed.registrations, routing: parsed.routing }
   } catch {
     return null
   }

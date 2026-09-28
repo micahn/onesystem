@@ -165,6 +165,7 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
     // `status` and the live tool surface cannot drift apart.
     registrations: registrations(config),
     idleShutdownSecs: config.idleShutdownSecs,
+    ...(config.routing ? { routing: config.routing } : {}),
   }
   process.stdout.write(JSON.stringify(report, null, 2) + "\n")
   return 0

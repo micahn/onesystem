@@ -47,7 +47,10 @@
 
 import { Plugin } from "@opencode/plugin"
 import { healthy } from "../health.ts"
-import { askDaemon, defaultCli, pluginLog as log, run } from "./discover.ts"
+import { resolve as resolveRouting } from "../routing.ts"
+import { askDaemon, defaultCli, pluginLog, run } from "./discover.ts"
+
+const log = pluginLog
 
 /**
  * MCP timeouts for the servers we register.
@@ -147,10 +150,31 @@ export default Plugin.define({
         target: targets[0]!.serverName,
       })
     }
-    const serverNames = targets.map((t) => t.serverName)
+
+    // Routing, when the config asks for it. With one backend this returns null and the
+    // per-backend names below stand, which is the point: a routing config that cannot
+    // route should not change anything.
+    const route = resolveRouting(answer?.routing, configured)
+    const named = route
+      ? [
+          { backend: route.preferred, serverName: route.preferredServerName },
+          ...route.others,
+        ]
+      : targets
+    if (route) {
+      log("routing is on", { preferred: route.preferred, others: route.others.map((o) => o.backend) })
+      if (route.guidance.length > 0) {
+        // Surfaced rather than enforced. A call cannot be dispatched by matching its text
+        // for a task name without putting a classifier in front of a classifier; the agent
+        // has the whole question and we do not.
+        pluginLog(`declared task routing:\n${route.guidance.join("\n")}`)
+      }
+    }
+
+    const serverNames = named.map((t) => t.serverName)
 
     const registration = await ctx.mcp.transform((editor) => {
-      for (const { backend, serverName } of targets) {
+      for (const { backend, serverName } of named) {
         editor.set(serverName, {
           type: "remote",
           url: `${base}/mcp/${backend}`,

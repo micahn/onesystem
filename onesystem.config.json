@@ -13,6 +13,23 @@
   // Ceiling on one forwarded MCP call. Matches LAYA_TOOL_TIMEOUT_SECS in the shim.
   "requestTimeoutSecs": 120,
 
+  // Which model answers when the agent has not said. Off unless enabled, and ignored
+  // entirely unless more than one backend is on -- a routing config with a single model
+  // is not a degraded route, it is no route.
+  //
+  // When on, `default` takes the bare `onesystem` server name, so an unqualified
+  // `onesystem.predict` reaches it. `tasks` is guidance the plugin logs, not dispatch:
+  // routing a call by matching its text for a task name would be a classifier in front of
+  // a classifier.
+  "routing": {
+    "enabled": false,
+    "default": "laya",
+    "tasks": {
+      "engineering": "laya",
+      "triage": "julia"
+    }
+  },
+
   "backends": {
     "laya": {
       "transport": "stdio-mcp",
