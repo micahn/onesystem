@@ -92,6 +92,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 /**
  * The entrypoints OpenCode discovers, one file per plugin half. Re-exports of the checkout,
  * so `git pull` is live and a moved checkout self-heals on the next run.
+ *
+ * These sit directly in the plugins dir, not in a subdirectory of it. OpenCode's
+ * auto-discovery is not recursive: it takes the `*.ts` and `*.js` files in the directory
+ * itself, and a nested one is never read. A `plugins/onesystem/index.ts` therefore loads
+ * nothing at all, silently, on every start.
  */
 export function pluginAutoloadFiles(): {
   dir: string
@@ -99,14 +104,14 @@ export function pluginAutoloadFiles(): {
 } {
   // OPENCODE_CONFIG_DIR is the config directory, so the plugins dir is a level under it.
   const base = process.env.OPENCODE_CONFIG_DIR ?? join(homedir(), ".config", "opencode")
-  const dir = join(base, "plugins", "onesystem")
+  const dir = join(base, "plugins")
   const from = (name: string) => fileURLToPath(new URL(`../src/plugin/${name}.ts`, import.meta.url))
   const reexport = (name: string) => `export { default } from ${JSON.stringify(from(name))}\n`
   return {
     dir,
     files: [
-      { path: join(dir, "index.ts"), contents: reexport("index") },
-      { path: join(dir, "tui.ts"), contents: reexport("tui") },
+      { path: join(dir, "onesystem-index.ts"), contents: reexport("index") },
+      { path: join(dir, "onesystem-tui.ts"), contents: reexport("tui") },
     ],
   }
 }

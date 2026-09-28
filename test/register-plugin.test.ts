@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, basename, dirname } from "node:path"
 import { pluginAutoloadFiles } from "../src/config-edit.ts"
 
 const src = (...p: string[]) => join(import.meta.dir, "..", ...p)
@@ -31,13 +31,15 @@ describe("the autoload files", () => {
   test("one entrypoint per half, as siblings", () => {
     // A lone `onesystem.ts` loads the server plugin and silently drops the TUI one.
     const { dir, files } = pluginAutoloadFiles()
-    expect(names(dir, files)).toEqual(["index.ts", "tui.ts"])
+    expect(names(dir, files)).toEqual(["onesystem-index.ts", "onesystem-tui.ts"])
   })
 
   test("each re-exports the entrypoint of the same name", () => {
     const { files } = pluginAutoloadFiles()
     for (const f of files) {
-      const name = f.path.slice(f.path.lastIndexOf("/") + 1)
+      // The file is prefixed so it cannot collide with another plugin's `index.ts` in the
+      // shared directory; the entrypoint it re-exports is the unprefixed name.
+      const name = basename(f.path).replace(/^onesystem-/, "")
       expect(f.contents.trim().endsWith(`/src/plugin/${name}"`)).toBe(true)
     }
   })
@@ -66,16 +68,22 @@ describe("the autoload files", () => {
 })
 
 describe("where the files land", () => {
-  test("a level under OPENCODE_CONFIG_DIR, which is the config dir", async () => {
-    // `<config-dir>/onesystem/` is a directory OpenCode never reads: a silent no-op install.
+  test("directly in OPENCODE_CONFIG_DIR/plugins, not a subdirectory", async () => {
+    // OpenCode's auto-discovery is not recursive: it reads the `*.ts` and `*.js` files in
+    // the plugins dir itself. A nested `plugins/onesystem/index.ts` is never loaded, and
+    // nothing says so -- the install reports success and the tools simply never appear.
     const dir = await mkdtemp(join(tmpdir(), "onesystem-oc-"))
-    const { dir: target } = await withConfigDir(dir, pluginAutoloadFiles)
-    expect(target).toBe(join(dir, "plugins", "onesystem"))
+    const { dir: target, files } = await withConfigDir(dir, pluginAutoloadFiles)
+    expect(target).toBe(join(dir, "plugins"))
+    for (const f of files) {
+      expect(dirname(f.path)).toBe(target)
+      expect(basename(f.path)).toMatch(/\.ts$/)
+    }
   })
 
   test("the default is ~/.config/opencode/plugins, not onesystem's own share dir", async () => {
     const { dir } = await withConfigDir(undefined, pluginAutoloadFiles)
-    expect(dir).toMatch(/\/\.config\/opencode\/plugins\/onesystem$/)
+    expect(dir).toMatch(/\/\.config\/opencode\/plugins$/)
   })
 })
 
@@ -104,7 +112,7 @@ describe("the user's OpenCode config", () => {
     await mkdir(dir, { recursive: true })
     for (const f of files) await writeFile(f.path, f.contents)
 
-    expect((await readdir(dir)).sort()).toEqual(["index.ts", "tui.ts"])
+    expect((await readdir(dir)).sort()).toEqual(["onesystem-index.ts", "onesystem-tui.ts"])
     expect(await readFile(path, "utf8")).toBe(config)
   })
 })
