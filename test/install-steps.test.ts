@@ -362,6 +362,33 @@ describe("an install on an NVIDIA card", () => {
     expect(manifest).toContain(`supersonic-julia = { path = "julia-src" }`)
     expect(manifest).not.toMatch(/rocm/i)
   })
+
+  test("a CUDA torch is the expected build here, and the install finishes", async () => {
+    // The pairing this fake runner defaulted to hid the bug. `scripted` returned ROCM_TORCH
+    // whatever the vendor was, so the NVIDIA case above was checked against an ROCm torch
+    // and passed -- a combination no NVIDIA machine produces. On a real card PyPI's torch is
+    // the CUDA build, which is what the manifest deliberately asks for, so `verify` has to
+    // read it as success. It used to assert ROCm's discriminator unconditionally and refuse
+    // every NVIDIA install with "this is a CUDA build of torch; it cannot see an AMD GPU",
+    // on a machine with no AMD GPU to see.
+    const { runner } = scripted({ gpu: "nvidia", torch: CUDA_TORCH })
+    const rt = await install(findModel("laya"), { runner })
+
+    const check = await verify(rt.dir, { vendor: "nvidia" }, runner)
+    expect(check.ok).toBe(true)
+    expect(check.problems).toEqual([])
+  })
+
+  test("a missing GPU is still a failure on an NVIDIA card", async () => {
+    // The gate is the vendor, not the presence of the ROCm facts. `torch.cuda.is_available()`
+    // is what has to hold either way, so a card that cannot be seen is caught on both
+    // branches -- dropping the ROCm checks must not have dropped this one with them.
+    const { runner } = scripted({
+      gpu: "nvidia",
+      torch: { hip: null, cuda: "13.0", available: false, arch: ["sm_90"] },
+    })
+    await expect(install(findModel("laya"), { runner })).rejects.toThrow(/is_available/)
+  })
 })
 
 describe("the checks on an installed environment", () => {
