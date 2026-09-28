@@ -170,15 +170,17 @@ to download PyTorch.
 
 ### Installer options
 
-Set these variables before running the curl command:
+Set these variables before running the installer:
 
 | Variable | Default | Use |
 | --- | --- | --- |
 | `ONESYSTEM_MODEL` | asks | Which runtimes to install: `laya`, `julia`, `1,2`, `all`, or `none`. |
-| `ONESYSTEM_DIR` | `~/.local/share/onesystem/repo` | Choose the checkout path for a curl install. |
+| `ONESYSTEM_DIR` | `~/.local/share/onesystem/repo` | Where the checkout lives. Wins over the checkout you run the script from. |
 
 For example, `export ONESYSTEM_MODEL=all`, then run the install command.
-Running `bash install.sh` from a checkout uses that checkout.
+Running `bash install.sh` from a checkout uses that checkout, unless `ONESYSTEM_DIR`
+names another. The installer prints the path it settled on, and opencode registers
+that path for good, so a checkout under `/tmp` gets a warning.
 
 ### Manual install
 
