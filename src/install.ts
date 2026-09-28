@@ -442,9 +442,11 @@ export async function verify(
   }
 
   const problems: string[] = []
-  // The cheap discriminator: a ROCm build reports a HIP version and no CUDA version.
-  if (info.cuda !== null) problems.push("this is a CUDA build of torch; it cannot see an AMD GPU")
-  if (info.hip === null) problems.push("torch reports no HIP version, so it is not a ROCm build")
+  if (gpu.vendor === "amd") {
+    // The cheap discriminator: a ROCm build reports a HIP version and no CUDA version.
+    if (info.cuda !== null) problems.push("this is a CUDA build of torch; it cannot see an AMD GPU")
+    if (info.hip === null) problems.push("torch reports no HIP version, so it is not a ROCm build")
+  }
   if (!info.available) problems.push("torch.cuda.is_available() is false: no GPU visible to this interpreter")
   if (gpu.gfx && !info.arch.includes(gpu.gfx)) {
     problems.push(`torch was not built for ${gpu.gfx}; it knows ${info.arch.join(", ") || "nothing"}`)
