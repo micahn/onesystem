@@ -363,7 +363,7 @@ describe("GPU memory in the sidebar", () => {
     const rows = cardRows(daemonView(withGpu(backend({ name: "laya", state: "warm" })), false)).map(
       (r) => r.text,
     )
-    expect(rows.join("\n")).toContain("3.0G vram")
+    expect(rows.join("\n")).toContain("laya warm · 3.0G")
     expect(rows.join("\n")).toContain("VRAM 9.0G / 16.0G")
   })
 
@@ -375,8 +375,11 @@ describe("GPU memory in the sidebar", () => {
       gpu: { totalBytes: 16 * 2 ** 30, usedBytes: 0, byBackend: { laya: null } },
     })
     const rows = cardRows(daemonView(cold, false)).map((r) => r.text)
-    // Not "0 vram": nothing was weighed, and a zero would read as a measurement.
-    expect(rows.some((t) => t.includes("vram"))).toBe(false)
+    // Not "0G": nothing was weighed, and a zero would read as a measurement. The name line
+    // stays "laya cold" on its own, and the card's own line is the only place a number for
+    // this model could have come from.
+    expect(rows.join("\n")).toContain("laya cold")
+    expect(rows.some((t) => /\d\.\dG/.test(t.split("\n")[1] ?? ""))).toBe(false)
   })
 
   test("a remote service is never given a memory figure", () => {
@@ -384,7 +387,8 @@ describe("GPU memory in the sidebar", () => {
       (r) => r.text,
     )
     // Its memory is real, but it belongs to whoever runs it, not to a model onesystem owns.
-    expect(rows.some((t) => t.includes("vram"))).toBe(false)
+    expect(rows.join("\n")).toContain("rev warm (remote)")
+    expect(rows.some((t) => t.includes("· 3.0G"))).toBe(false)
   })
 
   test("an unreadable card is a dash, not a zero", () => {
@@ -398,6 +402,7 @@ describe("GPU memory in the sidebar", () => {
 
   test("the dialog separates what the models hold from what the rest of the card does", () => {
     const text = statusReport(withGpu(backend({ name: "laya", state: "warm" })), "http://x")
+    expect(text).toContain("laya  warm  3.0G  0 calls")
     expect(text).toContain("VRAM 9.0G used of 16.0G")
     // The gap is somebody else's — this browser, a compositor — and saying so stops a
     // person assuming the models own the whole card.

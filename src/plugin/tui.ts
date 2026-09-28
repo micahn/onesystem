@@ -156,13 +156,15 @@ export function statusReport(health: HealthReport | null, base: string | null, w
 function backendRows(b: BackendStatus, kind?: "remote", gpu?: GpuMemory): string[] {
   const ms = b.lastMs === null ? "no calls yet" : `last ${b.lastMs}ms  mean ${b.meanMs}ms`
   // Only a model onesystem owns is measured; a remote service's memory is not ours to claim.
+  // On the name line, as in the card, so the two views do not disagree about where a fact
+  // lives.
   const held = kind === "remote" ? null : (gpu?.byBackend[b.name] ?? null)
   return [
-    `  ${b.name}${kind === "remote" ? "  (remote)" : ""}  ${b.state}  ${b.calls} calls` +
+    `  ${b.name}${kind === "remote" ? "  (remote)" : ""}  ${b.state}` +
+      `${held === null ? "" : `  ${formatVram(held)}`}  ${b.calls} calls` +
       `${b.errors ? `, ${b.errors} failed` : ""}  ${ms}${b.inflight ? `  ${b.inflight} in flight` : ""}`,
     // Models report answers and bytes, not token counts.
-    `    ${b.answered} answered${describeTypes(b.byType)}  ${formatBytes(b.inBytes)} in / ${formatBytes(b.outBytes)} out` +
-      (held === null ? "" : `  ${formatVram(held)} vram`),
+    `    ${b.answered} answered${describeTypes(b.byType)}  ${formatBytes(b.inBytes)} in / ${formatBytes(b.outBytes)} out`,
   ]
 }
 
@@ -253,20 +255,21 @@ export function cardRows(view: DaemonView): CardRow[] {
 /**
  * One backend: state, then usage indented underneath it.
  *
- * Memory is appended to the usage line rather than given a row of its own, because the
- * sidebar is narrow and this is the third fact about the same process. It appears only
- * when the driver accounts for the model: a cold model holds nothing, and a remote
- * service is not ours to measure, so in both cases there is no number to show.
+ * Memory sits on the name line rather than the usage line because it describes the model
+ * itself, and the eye reaches for the name first — "is rizzo loaded, and what will it
+ * cost me" is one glance, not two. It appears only when the driver accounts for the model:
+ * a cold model holds nothing, and a remote service is not ours to measure, so in both
+ * cases there is no number to show.
  */
 function oneRow(b: BackendStatus, remote: boolean, gpu: GpuMemory | undefined): CardRow[] {
   const held = remote ? null : (gpu?.byBackend[b.name] ?? null)
   return [
     {
-      text: `  ${b.name} ${b.state}${remote ? " (remote)" : ""}`,
+      text: `  ${b.name} ${b.state}${remote ? " (remote)" : ""}${held === null ? "" : ` · ${formatVram(held)}`}`,
       tone: b.state === "failed" ? "error" : b.state === "warm" ? "success" : "muted",
     },
     // A separate usage row fits the narrow sidebar.
-    { text: `    ${formatUsage(b)}${held === null ? "" : ` · ${formatVram(held)} vram`}`, tone: "muted" },
+    { text: `    ${formatUsage(b)}`, tone: "muted" },
   ]
 }
 
