@@ -8,7 +8,8 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal } from "solid-js"
 import { jsx } from "@opentui/solid/jsx-runtime"
-import { probeHealth, type HealthReport } from "../health.ts"
+import { probeHealth, type GpuMemory, type HealthReport } from "../health.ts"
+import { formatVram } from "../vram.ts"
 import type { BackendStatus } from "../backend/types.ts"
 import { loadConfig, probeConfig, type ConfigProbe } from "../config.ts"
 import {
@@ -127,12 +128,22 @@ export function statusReport(health: HealthReport | null, base: string | null, w
     return `no daemon is answering${base ? ` at ${base}` : ""} — run \`onesystem start\``
   }
 
+  const gpu = view.health.gpu
   const lines = [`daemon  ${base}   up ${Math.round(view.health.uptimeMs / 1000)}s`]
   // Match the card's model order.
-  for (const b of view.models) lines.push(...backendRows(b))
+  for (const b of view.models) lines.push(...backendRows(b, undefined, gpu))
   // Show remote services separately, including failures.
-  for (const b of view.remote) lines.push(...backendRows(b, "remote"))
+  for (const b of view.remote) lines.push(...backendRows(b, "remote", gpu))
   if (view.models.length === 0) lines.push("  no local model — nothing here holds the GPU")
+  // The card's own use, and how much of it the models above account for. The gap between
+  // the two is somebody else's — this browser, a desktop compositor — and showing it beats
+  // letting a person assume the models own the whole card.
+  const models = view.models.reduce((sum, b) => sum + (gpu?.byBackend[b.name] ?? 0), 0)
+  const unaccounted = gpu?.usedBytes === null || gpu?.usedBytes === undefined ? null : gpu.usedBytes - models
+  lines.push(
+    `VRAM ${formatVram(gpu?.usedBytes)} used of ${formatVram(gpu?.totalBytes)}` +
+      (unaccounted === null ? "" : `   models hold ${formatVram(models)}, the rest ${formatVram(unaccounted)}`),
+  )
   // The idle window applies only to local backends.
   lines.push(
     `idle window ${view.health.idleShutdownSecs}s` +
@@ -142,13 +153,16 @@ export function statusReport(health: HealthReport | null, base: string | null, w
 }
 
 /** One backend, as the dialog lays it out: state and calls, then volume underneath. */
-function backendRows(b: BackendStatus, kind?: "remote"): string[] {
+function backendRows(b: BackendStatus, kind?: "remote", gpu?: GpuMemory): string[] {
   const ms = b.lastMs === null ? "no calls yet" : `last ${b.lastMs}ms  mean ${b.meanMs}ms`
+  // Only a model onesystem owns is measured; a remote service's memory is not ours to claim.
+  const held = kind === "remote" ? null : (gpu?.byBackend[b.name] ?? null)
   return [
     `  ${b.name}${kind === "remote" ? "  (remote)" : ""}  ${b.state}  ${b.calls} calls` +
       `${b.errors ? `, ${b.errors} failed` : ""}  ${ms}${b.inflight ? `  ${b.inflight} in flight` : ""}`,
     // Models report answers and bytes, not token counts.
-    `    ${b.answered} answered${describeTypes(b.byType)}  ${formatBytes(b.inBytes)} in / ${formatBytes(b.outBytes)} out`,
+    `    ${b.answered} answered${describeTypes(b.byType)}  ${formatBytes(b.inBytes)} in / ${formatBytes(b.outBytes)} out` +
+      (held === null ? "" : `  ${formatVram(held)} vram`),
   ]
 }
 
@@ -215,11 +229,18 @@ export function cardRows(view: DaemonView): CardRow[] {
   const rows: CardRow[] = [
     { text: `onesystem  ${view.warm}/${view.models.length} warm`, tone: "base" },
   ]
-  for (const b of view.models) rows.push(...oneRow(b, false))
-  for (const b of view.remote) rows.push(...oneRow(b, true))
+  const gpu = view.health?.gpu
+  for (const b of view.models) rows.push(...oneRow(b, false, gpu))
+  for (const b of view.remote) rows.push(...oneRow(b, true, gpu))
   if (view.models.length === 0) {
     rows.push({ text: "  no local model — the GPU is free", tone: "muted" })
   }
+  // The card's own line, so a missing figure reads as an unreadable card rather than as a
+  // model that is somehow holding nothing.
+  rows.push({
+    text: `  VRAM ${formatVram(gpu?.usedBytes)} / ${formatVram(gpu?.totalBytes)}`,
+    tone: "base",
+  })
   if (view.idleLeftMs !== null) {
     rows.push({
       text: view.idleLeftMs === 0 ? "  winding down" : `  idle in ${Math.round(view.idleLeftMs / 1000)}s`,
@@ -229,15 +250,23 @@ export function cardRows(view: DaemonView): CardRow[] {
   return rows
 }
 
-/** One backend: state, then usage indented underneath it. */
-function oneRow(b: BackendStatus, remote: boolean): CardRow[] {
+/**
+ * One backend: state, then usage indented underneath it.
+ *
+ * Memory is appended to the usage line rather than given a row of its own, because the
+ * sidebar is narrow and this is the third fact about the same process. It appears only
+ * when the driver accounts for the model: a cold model holds nothing, and a remote
+ * service is not ours to measure, so in both cases there is no number to show.
+ */
+function oneRow(b: BackendStatus, remote: boolean, gpu: GpuMemory | undefined): CardRow[] {
+  const held = remote ? null : (gpu?.byBackend[b.name] ?? null)
   return [
     {
       text: `  ${b.name} ${b.state}${remote ? " (remote)" : ""}`,
       tone: b.state === "failed" ? "error" : b.state === "warm" ? "success" : "muted",
     },
     // A separate usage row fits the narrow sidebar.
-    { text: `    ${formatUsage(b)}`, tone: "muted" },
+    { text: `    ${formatUsage(b)}${held === null ? "" : ` · ${formatVram(held)} vram`}`, tone: "muted" },
   ]
 }
 

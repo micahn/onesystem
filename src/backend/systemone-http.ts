@@ -128,6 +128,11 @@ export class SystemOneBackendImpl implements Backend {
     }
   }
 
+  /** Owns no process, so there is nothing to attribute memory to. */
+  ownedPids(): number[] {
+    return []
+  }
+
   describe(): BackendStatus {
     return {
       name: this.name,

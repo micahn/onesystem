@@ -53,6 +53,8 @@ export class StdioMcpBackend implements Backend {
 
   #state: BackendState = "cold"
   #client: Client | null = null
+  /** The child process, while it is ours. See `ownedPids`. */
+  #pid: number | null = null
   #starting: Promise<void> | null = null
   /**
    * Shared call accounting. Leaked inflight counts would prevent idle shutdown.
@@ -149,6 +151,7 @@ export class StdioMcpBackend implements Backend {
     }
 
     this.#client = client
+    this.#pid = transport.pid
     this.#state = "warm"
     this.#ledger.touch()
     log.info("warm", { startupMs: this.#now() - started })
@@ -171,6 +174,7 @@ export class StdioMcpBackend implements Backend {
 
     const client = this.#client
     this.#client = null
+    this.#pid = null
     this.#state = "cold"
     if (wasCold && !client) return
     try {
@@ -215,6 +219,16 @@ export class StdioMcpBackend implements Backend {
       }
       throw new BackendError(this.name, `${ctx.method} failed: ${describeError(err)}`, err)
     }
+  }
+
+  /**
+   * The child's pid, read from the transport's own getter after the handshake. Held here
+   * rather than asked of the client because the client does not expose its transport, and
+   * null while cold rather than a remembered pid, which would eventually attribute another
+   * process's memory to us.
+   */
+  ownedPids(): number[] {
+    return this.#pid === null ? [] : [this.#pid]
   }
 
   describe(): BackendStatus {

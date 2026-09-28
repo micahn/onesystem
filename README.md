@@ -175,6 +175,27 @@ Each `stdio-mcp` backend must declare `tools` without its `toolPrefix`. The daem
 serves this list without starting the model. Update it when a backend adds or renames
 tools. MCP `tools/list` returns the backend's actual schemas but starts the process.
 
+### GPU memory
+
+`GET /health` carries a `gpu` block, and the sidebar card and the `/onesystem` dialog
+show it: each model against the card's total.
+
+Per model, the figure is the DRM client's own accounting —
+`drm-resident-vram` plus `drm-resident-gtt` from `/proc/<pid>/fdinfo`, summed over the
+processes onesystem owns for that backend. GTT is included because a model close to
+running out pages through it, and leaving it out understates exactly the case you would
+be reading the number to find out.
+
+This is not read from `rocm-smi --showpids`, which lists KFD *compute* processes only: a
+model on Vulkan does not appear in it at all and reads as holding nothing. rizzo is a
+Vulkan client, and on this machine `rocm-smi` reported 0 bytes for a process holding 5.3
+GB, while the DRM accounting was right. The card's own size still comes from the vendor
+tool (`rocm-smi` or `nvidia-smi`), since nothing in `/proc` sums to it.
+
+A figure is the driver's or it is absent. A cold model, a remote service onesystem does
+not own, and a card whose driver cannot be queried are all reported as unknown rather
+than as zero, because "0 bytes" claims something was measured and found empty.
+
 The plugin strips `toolPrefix` from displayed names. With one backend, tools use
 names such as `predict`. With several, they use `laya_predict` and `julia_predict`.
 Enable `routing` and set its `default` to let one backend keep unqualified names.

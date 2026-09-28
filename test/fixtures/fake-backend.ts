@@ -95,6 +95,12 @@ export class FakeBackend implements Backend {
     }
   }
 
+  /** Configurable so a test can make this fake look like it holds GPU memory. */
+  pids: number[] = []
+  ownedPids(): number[] {
+    return [...this.pids]
+  }
+
   async quiesce(): Promise<void> {
     this.quiesceCount++
     this.#state = "cold"
@@ -136,6 +142,10 @@ export class HangingBackend implements Backend {
     }
     await new Promise(() => {})
     return undefined
+  }
+
+  ownedPids(): number[] {
+    return []
   }
 
   async quiesce(): Promise<void> {

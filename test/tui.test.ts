@@ -353,3 +353,54 @@ describe("plugin logging", () => {
     expect(tui).not.toContain("process.stdout.write")
   })
 })
+
+describe("GPU memory in the sidebar", () => {
+  const gpu = { totalBytes: 16 * 2 ** 30, usedBytes: 9 * 2 ** 30, byBackend: { laya: 3 * 2 ** 30 } }
+  const withGpu = (...backends: BackendStatus[]) =>
+    healthReport({ idleShutdownSecs: 600, backends, gpu })
+
+  test("each model shows what it holds, and the card shows the total against its size", () => {
+    const rows = cardRows(daemonView(withGpu(backend({ name: "laya", state: "warm" })), false)).map(
+      (r) => r.text,
+    )
+    expect(rows.join("\n")).toContain("3.0G vram")
+    expect(rows.join("\n")).toContain("VRAM 9.0G / 16.0G")
+  })
+
+  test("a cold model shows no memory, because it is holding none", () => {
+    // A cold backend owns no process, so the daemon attributes null to it rather than 0.
+    const cold = healthReport({
+      idleShutdownSecs: 600,
+      backends: [backend({ name: "laya", state: "cold" })],
+      gpu: { totalBytes: 16 * 2 ** 30, usedBytes: 0, byBackend: { laya: null } },
+    })
+    const rows = cardRows(daemonView(cold, false)).map((r) => r.text)
+    // Not "0 vram": nothing was weighed, and a zero would read as a measurement.
+    expect(rows.some((t) => t.includes("vram"))).toBe(false)
+  })
+
+  test("a remote service is never given a memory figure", () => {
+    const rows = cardRows(daemonView(withGpu(backend({ name: "rev", local: false, state: "warm" })), false)).map(
+      (r) => r.text,
+    )
+    // Its memory is real, but it belongs to whoever runs it, not to a model onesystem owns.
+    expect(rows.some((t) => t.includes("vram"))).toBe(false)
+  })
+
+  test("an unreadable card is a dash, not a zero", () => {
+    const rows = cardRows(daemonView(report(backend({ name: "laya", state: "warm" })), false)).map(
+      (r) => r.text,
+    )
+    // Without this line, a machine whose driver cannot be read would look identical to one
+    // where nothing is loaded.
+    expect(rows.join("\n")).toContain("VRAM — / —")
+  })
+
+  test("the dialog separates what the models hold from what the rest of the card does", () => {
+    const text = statusReport(withGpu(backend({ name: "laya", state: "warm" })), "http://x")
+    expect(text).toContain("VRAM 9.0G used of 16.0G")
+    // The gap is somebody else's — this browser, a compositor — and saying so stops a
+    // person assuming the models own the whole card.
+    expect(text).toContain("models hold 3.0G, the rest 6.0G")
+  })
+})

@@ -293,6 +293,11 @@ export class SystemOneServeBackend implements Backend {
     return await res.json()
   }
 
+  /** The spawned service, which is where its GPU memory goes. Null while cold. */
+  ownedPids(): number[] {
+    return this.#child?.pid === undefined ? [] : [this.#child.pid]
+  }
+
   describe(): BackendStatus {
     return {
       name: this.name,

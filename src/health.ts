@@ -32,6 +32,19 @@ export interface DaemonStatus {
   routing?: RoutingConfig
 }
 
+/**
+ * GPU memory, read from the driver rather than from any backend. Sums every card, because a
+ * model is not pinned to one. `byBackend` attributes a total to the model holding it by
+ * matching the process onesystem owns, so a figure is the driver's or it is absent — never
+ * apportioned by share, and never reported as zero when it could not be read.
+ */
+export interface GpuMemory {
+  totalBytes: number | null
+  usedBytes: number | null
+  /** Per backend name, or null where the driver lists no such process. */
+  byBackend: Record<string, number | null>
+}
+
 export interface HealthReport {
   status: "ok"
   /** Process id of the daemon. What `onesystem stop` signals. */
@@ -41,11 +54,17 @@ export interface HealthReport {
   /** Backends whose quiesce would release a local process. */
   anyLocalWarm: boolean
   backends: BackendStatus[]
+  /**
+   * Absent rather than zero-filled when the card could not be read, so a machine with no
+   * readable driver and one holding nothing are not the same answer.
+   */
+  gpu?: GpuMemory
 }
 
 export interface HealthInput {
   idleShutdownSecs: number
   backends: BackendStatus[]
+  gpu?: GpuMemory
 }
 
 /** Assemble the report. Pure, so the shape is testable without a listener. */
@@ -57,6 +76,8 @@ export function healthReport(input: HealthInput, now: () => number = Date.now): 
     idleShutdownSecs: input.idleShutdownSecs,
     anyLocalWarm: input.backends.some((b) => b.local && b.state === "warm"),
     backends: input.backends,
+    // Omitted when there is nothing to say, so a client can tell "no card" from "empty card".
+    ...(input.gpu ? { gpu: input.gpu } : {}),
   }
 }
 

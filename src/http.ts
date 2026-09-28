@@ -27,6 +27,8 @@ import {
 import type { Config } from "./config.ts"
 import { daemonUrl } from "./paths.ts"
 import { healthReport } from "./health.ts"
+import { run } from "./subprocess.ts"
+import { attribute, VramReader } from "./vram.ts"
 import { modelFor } from "./models.ts"
 import { describeError } from "./async.ts"
 import { logger } from "./log.ts"
@@ -53,6 +55,7 @@ export interface RunningDaemon {
 }
 
 export async function serve(config: Config, backends: BackendRoutes): Promise<RunningDaemon> {
+  const vram = new VramReader(run)
   /** MCP session id -> its transport. The transport owns the Server it is paired with. */
   const sessions = new Map<string, StreamableHTTPServerTransport>()
   /**
@@ -161,8 +164,18 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     res.setHeader("x-onesystem", VERSION)
 
     if (url.pathname === "/health" && req.method === "GET") {
+      // The card is read here because this is the one endpoint the plugin polls, and the
+      // sample is cached: a footer, a card and a dialog can all ask inside one interval,
+      // and the driver is two subprocesses.
+      const statuses = backends.snapshot().backends
+      const owned = new Map(statuses.map((b) => [b.name, backends.get(b.name).ownedPids()]))
+      const sample = await vram.sample([...owned.values()].flat())
       const body = JSON.stringify(
-        healthReport({ idleShutdownSecs: config.idleShutdownSecs, backends: backends.snapshot().backends }),
+        healthReport({
+          idleShutdownSecs: config.idleShutdownSecs,
+          backends: statuses,
+          gpu: attribute(sample, owned),
+        }),
       )
       res.writeHead(200, { "content-type": "application/json" })
       res.end(body)

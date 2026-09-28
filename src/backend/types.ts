@@ -86,6 +86,12 @@ export interface Backend {
    * Must be idempotent; no child may appear after cleanup completes.
    */
   quiesce(): Promise<void>
+  /**
+   * Pids of the processes this backend owns, for attributing GPU memory to it. Empty when it
+   * owns nothing, and empty while cold: a pid that has gone is better reported as absent
+   * than carried in a stale map.
+   */
+  ownedPids(): number[]
   /** Status for `onesystem status` and `GET /health`. Must not load anything. */
   describe(): BackendStatus
 }
