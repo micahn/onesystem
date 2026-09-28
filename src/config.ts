@@ -33,7 +33,10 @@ export interface Config {
    * Seconds between idle checks. Must not exceed idleShutdownSecs.
    */
   idleSweepSecs: number
-  /** Maximum seconds per forwarded call, enforced by the supervisor. */
+  /**
+   * Maximum seconds per forwarded call, cold start included. Must be at least every
+   * backend's startupTimeoutSecs, since a cold call spawns the backend inside it.
+   */
   requestTimeoutSecs: number
   backends: Record<string, ConfiguredBackend>
   /**
@@ -48,7 +51,10 @@ export const DEFAULTS: Config = {
   host: "127.0.0.1",
   idleShutdownSecs: 600,
   idleSweepSecs: 5,
-  requestTimeoutSecs: 120,
+  // The ceiling a cold call has to fit into: spawning a backend, importing transformers
+  // and loading weights all happen inside it, so it cannot be below the stdio default
+  // startup budget of 180.
+  requestTimeoutSecs: 180,
   backends: {},
 }
 
@@ -90,6 +96,11 @@ export function validate(raw: unknown, source: string): Config {
     throw new Error(`${source}: expected a JSON object`)
   }
   const input = raw as Record<string, unknown>
+  const requestTimeoutSecs = requireNumber(
+    input.requestTimeoutSecs,
+    `${source}: requestTimeoutSecs`,
+    DEFAULTS.requestTimeoutSecs,
+  )
 
   const backends: Config["backends"] = {}
   const rawBackends = (input.backends ?? {}) as Record<string, unknown>
@@ -155,6 +166,19 @@ export function validate(raw: unknown, source: string): Config {
     }
   }
 
+  for (const [name, backend] of Object.entries(backends)) {
+    const startup = backend.startupTimeoutSecs ?? 0
+    if (startup > requestTimeoutSecs) {
+      throw new Error(
+        `${source}: backends.${name}.startupTimeoutSecs (${startup}) exceeds ` +
+          `requestTimeoutSecs (${requestTimeoutSecs}). A cold call spawns the backend and ` +
+          `loads its weights inside one request, so the request ceiling is what actually ` +
+          `bounds the cold start. Raise requestTimeoutSecs to at least ${startup}, or lower ` +
+          `this backend's startupTimeoutSecs.`,
+      )
+    }
+  }
+
   const host = typeof input.host === "string" ? input.host : DEFAULTS.host
   if (!isLoopbackHost(host)) {
     throw new Error(
@@ -188,11 +212,7 @@ export function validate(raw: unknown, source: string): Config {
     port: requirePort(input.port, `${source}: port`, DEFAULTS.port),
     idleShutdownSecs,
     idleSweepSecs,
-    requestTimeoutSecs: requireNumber(
-      input.requestTimeoutSecs,
-      `${source}: requestTimeoutSecs`,
-      DEFAULTS.requestTimeoutSecs,
-    ),
+    requestTimeoutSecs,
     backends,
     routing: readRouting(input.routing),
   }

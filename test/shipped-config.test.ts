@@ -85,6 +85,19 @@ describe("the shipped config", () => {
     expect(env).toContain("LAYA_PRELOAD")
   })
 
+  test("its request ceiling is not below what it allows a backend to spend starting", async () => {
+    // The supervisor's deadline covers the cold start, so a backend whose
+    // startupTimeoutSecs is above requestTimeoutSecs can never use the budget it was
+    // given. The template shipped laya at 180 against a 120 ceiling, which meant the
+    // number in the file was unreachable rather than permissive.
+    const config = validate(parse(await readFile(shipped, "utf8")) as object, shipped)
+    for (const [name, spec] of Object.entries(config.backends)) {
+      expect(`${name}: ${spec.startupTimeoutSecs} <= ${config.requestTimeoutSecs}`).toSatisfy(
+        () => spec.startupTimeoutSecs! <= config.requestTimeoutSecs,
+      )
+    }
+  })
+
   test("a runtime path points at where the installer actually writes", async () => {
     // `install.ts` puts runtimes under `$ONESYSTEM_DATA_DIR/runtimes`, defaulting to
     // `~/.local/share/onesystem`. The shipped file pointed at `<repo>/runtimes/...`, which

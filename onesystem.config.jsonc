@@ -11,8 +11,10 @@
   // Seconds between idle checks. Must not exceed idleShutdownSecs.
   "idleSweepSecs": 5,
 
-  // Maximum seconds per forwarded call, enforced by the daemon.
-  "requestTimeoutSecs": 120,
+  // Maximum seconds per forwarded call, enforced by the daemon. A cold call spawns
+  // the backend and loads its weights inside this, so it must be at least as large as
+  // every backend's startupTimeoutSecs below.
+  "requestTimeoutSecs": 180,
 
   // Default model for multiple enabled backends. `tasks` is logged guidance only.
   "routing": {

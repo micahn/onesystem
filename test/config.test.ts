@@ -135,6 +135,52 @@ describe("config validation", () => {
     expect(validate({ idleShutdownSecs: 5, idleSweepSecs: 5 }, "test").idleSweepSecs).toBe(5)
   })
 
+  test("refuses a startup budget the request ceiling can never reach", () => {
+    // The supervisor puts requestTimeoutSecs on the whole forwarded call, so a backend
+    // allowed to take longer to spawn than a call is allowed to run has a budget no
+    // execution can honour. It used to load: the shipped template did exactly this, which
+    // is why `startupTimeoutSecs: 180` never meant anything against a 120s ceiling.
+    const bad = {
+      requestTimeoutSecs: 30,
+      backends: { laya: { transport: "stdio-mcp", command: ["x"], tools: ["predict"], startupTimeoutSecs: 60 } },
+    }
+    expect(() => validate(bad, "test")).toThrow(/startupTimeoutSecs/)
+    expect(validate({ ...bad, requestTimeoutSecs: 60 }, "test")).toBeDefined()
+  })
+
+  test("the message names the backend, both numbers, and the two ways out", () => {
+    // A refusal a user cannot act on gets worked around by deleting the backend, which
+    // loses the tool surface entirely and silently.
+    let message = ""
+    try {
+      validate(
+        {
+          requestTimeoutSecs: 30,
+          backends: { laya: { transport: "stdio-mcp", command: ["x"], tools: ["predict"], startupTimeoutSecs: 60 } },
+        },
+        "my-config.json",
+      )
+    } catch (err) {
+      message = (err as Error).message
+    }
+    expect(message).toContain("my-config.json: backends.laya.startupTimeoutSecs (60)")
+    expect(message).toContain("requestTimeoutSecs (30)")
+    expect(message).toContain("Raise requestTimeoutSecs to at least 60")
+  })
+
+  test("the default request ceiling covers the default startup budget", () => {
+    // A stdio backend with no startupTimeoutSecs of its own is allowed 180s to spawn. If
+    // the default request ceiling were below that, the shipped template's own omission
+    // would produce a config that cannot load.
+    for (const transport of ["stdio-mcp", "systemone-http"] as const) {
+      const backend =
+        transport === "stdio-mcp"
+          ? { transport, command: ["x"], tools: ["predict"] }
+          : { transport, baseUrl: "http://127.0.0.1:8000" }
+      expect(() => validate({ backends: { x: backend } }, "test")).not.toThrow()
+    }
+  })
+
   test("names the offending field and the source in the message", () => {
     expect(
       () => validate({ backends: { laya: { transport: "stdio-mcp", tools: ["predict"] } } }, "my-config.json"),
