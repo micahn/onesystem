@@ -25,7 +25,6 @@ function buildStatus(): DaemonStatus {
   const base = daemonUrl(config.host, config.port)
   return {
     config: "/home/u/.config/onesystem/onesystem.jsonc",
-    configCandidates: ["/home/u/.config/onesystem/onesystem.jsonc", "/src/onesystem.config.jsonc"],
     configDir: "/home/u/.config/onesystem",
     url: base,
     running: true,
@@ -46,7 +45,6 @@ describe("the status payload", () => {
   test("it carries exactly these keys", () => {
     expect(Object.keys(buildStatus()).sort()).toEqual([
       "config",
-      "configCandidates",
       "configDir",
       "daemon",
       "idleShutdownSecs",

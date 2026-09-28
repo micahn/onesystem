@@ -64,14 +64,6 @@
       "startupTimeoutSecs": 120,
       "tools": ["predict"],
       "enabled": false
-    },
-
-    // Existing POST /v1/systemone service. Start it separately.
-    "rev": {
-      "transport": "systemone-http",
-      "baseUrl": "http://127.0.0.1:8000",
-      "startupTimeoutSecs": 30,
-      "enabled": false
     }
   }
 }

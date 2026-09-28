@@ -6,7 +6,7 @@
 import { readFile } from "node:fs/promises"
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import type { ConfiguredBackend, Transport } from "./backend/spec.ts"
-import { configCandidates } from "./paths.ts"
+import { configPath } from "./paths.ts"
 import type { RoutingConfig } from "./routing.ts"
 
 // Keep backend types available to existing config consumers.
@@ -219,19 +219,14 @@ function readRouting(raw: unknown): RoutingConfig | undefined {
 }
 
 export async function loadConfig(path?: string): Promise<{ config: Config; path: string }> {
-  const candidates = configCandidates(path)
-  const tried: string[] = []
-  for (const candidate of candidates) {
-    tried.push(candidate)
-    let text: string
-    try {
-      text = await readFile(candidate, "utf8")
-    } catch {
-      continue
-    }
-    return { config: validate(parseConfig(text, candidate), candidate), path: candidate }
+  const file = path ?? configPath()
+  let text: string
+  try {
+    text = await readFile(file, "utf8")
+  } catch {
+    throw new Error(`no config at ${file}. Run 'onesystem install' to write one.`)
   }
-  throw new Error(`no onesystem config found; looked in:\n  ${tried.join("\n  ")}`)
+  return { config: validate(parseConfig(text, file), file), path: file }
 }
 
 /**

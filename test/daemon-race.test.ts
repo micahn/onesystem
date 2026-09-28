@@ -14,6 +14,7 @@ import { validate, type Config } from "../src/config.ts"
 import { LockBusy } from "../src/lock.ts"
 import type { BackendPort } from "../src/backend/types.ts"
 import { FakeBackend } from "./fixtures/fake-backend.ts"
+import { probeHealth as probe } from "../src/health.ts"
 
 const cleanups: (() => Promise<void>)[] = []
 const dirs: string[] = []
@@ -243,10 +244,16 @@ describe("the start/exit-code contract", () => {
     cleanups.push(() => daemon.close())
 
     // A config file the CLI will read, pointing at the live daemon's port.
-    const configPath = join(dir, "onesystem.json")
+    // `backends` must name what the live daemon serves, or `start` refuses to adopt it.
+    const configPath = join(dir, "onesystem.jsonc")
     await Bun.write(
       configPath,
-      JSON.stringify({ port: daemon.port, idleShutdownSecs: 300, idleSweepSecs: 5, backends: {} }),
+      JSON.stringify({
+        port: daemon.port,
+        idleShutdownSecs: 300,
+        idleSweepSecs: 5,
+        backends: { a: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["status"] } },
+      }),
     )
     const env = { ONESYSTEM_CONFIG_DIR: dir, ONESYSTEM_STATE_DIR: dir }
 
@@ -260,11 +267,8 @@ describe("the start/exit-code contract", () => {
     // and an environment variable no daemon module reads, so a user who set `port` in the
     // config got an MCP server pointing at a port nothing was listening on.
     //
-    // Written as `.jsonc` because that is the name the loader prefers. This used to
-    // assert `configCandidates[0] === configPath`, which only held while there was one
-    // candidate; with `.json` kept as a fallback there are three, and the assertion was
-    // really asking "is the config that got loaded the first one?", which `config` below
-    // already answers directly.
+    // One config name, so `config` below answers "is this the file that got loaded?"
+    // directly, with no candidate list to reason about.
     const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
     dirs.push(dir)
     const configPath = join(dir, "onesystem.jsonc")
@@ -294,47 +298,76 @@ describe("the start/exit-code contract", () => {
     }
     expect(status.url).toBe("http://127.0.0.1:9999")
     expect(status.config).toBe(configPath)
-    // The reported config has to be one the plugin was told to look for, or a reader
-    // cannot tell whether the address came from their file or from the bundled example.
-    expect(status.configCandidates).toContain(configPath)
+    // The address came from this file and not from a fallback, so a missing or renamed
+    // config is an error naming the path rather than another file quietly answering.
+    expect(status.config).toBe(join(dir, "onesystem.jsonc"))
     // The prefix survives the trip. The plugin used to receive it and drop it.
     expect(status.registrations[0]).toMatchObject({ backend: "mine", serverName: "onesystem", toolPrefix: "mine_" })
   }, 20_000)
 
-  test("a config named .json still loads, and .jsonc wins when both exist", async () => {
-    // `.json` is a fallback, not a deprecated path nobody should use, so it needs to keep
-    // working for anyone who wrote one before the rename. The risk is silent: a config
-    // that stops being found does not fail, the bundled example answers instead, and the
-    // user gets a port and a backend set they never wrote.
+  test("start refuses a daemon that serves a different backend set", async () => {
+    // The bug this guards: a daemon on the port from a different config answers health
+    // checks fine, so `start` adopted it and served the wrong backends with no error. It
+    // reached a user as "where did julia go" with julia installed and enabled the whole
+    // time. Refuse rather than adopt, and say what is running.
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
+    dirs.push(dir)
+    const daemon = await runDaemon(testConfig(0), {
+      lockFile: join(dir, "daemon.lock"),
+      handleSignals: false,
+      backends: fakePort({ a: new FakeBackend({ name: "a" }) }),
+    })
+    cleanups.push(() => daemon.close())
+
+    // This config wants a backend the live daemon does not have.
+    await Bun.write(
+      join(dir, "onesystem.jsonc"),
+      JSON.stringify({
+        port: daemon.port,
+        idleShutdownSecs: 300,
+        idleSweepSecs: 5,
+        backends: { b: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["status"] } },
+      }),
+    )
+    const env = { ONESYSTEM_CONFIG_DIR: dir, ONESYSTEM_STATE_DIR: dir }
+
+    const child = spawn(process.execPath, [CLI, "start"], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] })
+    let stderr = ""
+    child.stderr?.on("data", (d) => (stderr += String(d)))
+    const code = await new Promise<number>((r) => child.on("close", (c) => r(c ?? 0)))
+
+    expect(code).not.toBe(0)
+    expect(stderr).toContain("serves [a]")
+    expect(stderr).toContain("wants [b]")
+    // It must not have killed a daemon it does not own.
+    expect((await probe(daemon.url))?.backends.map((b) => b.name)).toEqual(["a"])
+  }, 30_000)
+
+  test("a stale onesystem.json is an error, not something to load", async () => {
+    // The `.json` name is gone. Reading it would be a silent success on a file the
+    // installer no longer writes, which is the failure mode this project keeps hitting:
+    // old settings that keep working instead of erroring. Missing config must name the
+    // path it wanted, so the user knows what to run.
     const dir = await mkdtemp(join(tmpdir(), "onesystem-race-"))
     dirs.push(dir)
     const env = { ONESYSTEM_CONFIG_DIR: dir, ONESYSTEM_STATE_DIR: dir }
-    const body = (port: number) => JSON.stringify({ port, backends: {} })
 
-    const read = async (): Promise<{ url: string; config: string }> => {
-      const out = await new Promise<string>((resolve) => {
-        const child = spawn(process.execPath, [CLI, "status"], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "ignore"] })
-        let stdout = ""
-        child.stdout?.on("data", (d) => (stdout += String(d)))
-        child.on("close", () => resolve(stdout))
+    const run = async (args: string[]): Promise<{ code: number; stderr: string }> => {
+      const child = spawn(process.execPath, [CLI, ...args], {
+        env: { ...process.env, ...env },
+        stdio: ["ignore", "ignore", "pipe"],
       })
-      return JSON.parse(out)
+      let stderr = ""
+      child.stderr?.on("data", (d) => (stderr += String(d)))
+      const code = await new Promise<number>((r) => child.on("close", (c) => r(c ?? 0)))
+      return { code, stderr }
     }
 
-    const jsonPath = join(dir, "onesystem.json")
-    const jsoncPath = join(dir, "onesystem.jsonc")
+    await Bun.write(join(dir, "onesystem.json"), JSON.stringify({ port: 7101, backends: {} }))
 
-    // Only .json present: it has to be found, or the port below is the bundled example's.
-    await Bun.write(jsonPath, body(7101))
-    let status = await read()
-    expect(status.config).toBe(jsonPath)
-    expect(status.url).toBe("http://127.0.0.1:7101")
-
-    // Both present: .jsonc is preferred, so a user who has migrated is not still served
-    // the file they replaced.
-    await Bun.write(jsoncPath, body(7102))
-    status = await read()
-    expect(status.config).toBe(jsoncPath)
-    expect(status.url).toBe("http://127.0.0.1:7102")
+    const status = await run(["status"])
+    expect(status.code).not.toBe(0)
+    expect(status.stderr).toContain(join(dir, "onesystem.jsonc"))
+    expect(status.stderr).toContain("install")
   }, 20_000)
 })

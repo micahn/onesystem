@@ -94,7 +94,7 @@ describe("lazy start", () => {
     const { dir, marker, port } = await workspace()
     const config = testConfig(port, marker, 300)
     const lockFile = join(dir, "daemon.lock")
-    const configPath = join(dir, "onesystem.json")
+    const configPath = join(dir, "onesystem.jsonc")
     await writeFile(
       configPath,
       JSON.stringify({

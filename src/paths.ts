@@ -15,23 +15,9 @@ export function lockPath(): string {
   return join(stateDir(), "daemon.lock")
 }
 
-/**
- * User config paths in search order. Prefer `.jsonc`; accept `.json` for compatibility.
- */
-export function configPaths(): string[] {
-  return [join(configDir(), "onesystem.jsonc"), join(configDir(), "onesystem.json")]
-}
-
-/** Where a bundled example lives, used when the user has no config yet. */
-export function shippedConfigPath(): string {
-  return new URL("../onesystem.config.jsonc", import.meta.url).pathname
-}
-
-/**
- * Search user configs, then the bundled template. An explicit path replaces this list.
- */
-export function configCandidates(path?: string): string[] {
-  return path ? [path] : [...configPaths(), shippedConfigPath()]
+/** The one config path. A missing file is an error naming it, not a fallback to something else. */
+export function configPath(): string {
+  return join(configDir(), "onesystem.jsonc")
 }
 
 /**

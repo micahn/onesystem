@@ -9,7 +9,7 @@ import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { loadConfig, type Config } from "./config.ts"
-import { configCandidates, configDir, daemonUrl, lockPath, stateDir } from "./paths.ts"
+import { configDir, configPath, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
 import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
@@ -53,8 +53,20 @@ async function cmdStart(config: Config): Promise<number> {
 
   const existing = await probe(url)
   if (existing) {
-    log.info("already running", { url, pid: existing.pid })
-    return 0
+    const serving = existing.backends.map((b) => b.name).sort()
+    const wanted = registrations(config.backends).map((r) => r.backend).sort()
+    if (serving.join() === wanted.join()) {
+      log.info("already running", { url, pid: existing.pid })
+      return 0
+    }
+    // Not ours to adopt. A daemon on this port from a different config answers health
+    // checks fine, so without this check the wrong backends are served and nothing says so.
+    process.stderr.write(
+      `a daemon on ${url} (pid ${existing.pid}) serves [${serving.join(", ")}],\n` +
+        `but this config wants [${wanted.join(", ")}].\n` +
+        `It was started from a different config. Run 'onesystem stop', then start again.\n`,
+    )
+    return 1
   }
 
   // Log detached stderr to a file. An inherited pipe would stay open until the
@@ -125,14 +137,13 @@ async function cmdStop(config: Config): Promise<number> {
   return 1
 }
 
-async function cmdStatus(config: Config, configPath: string): Promise<number> {
+async function cmdStatus(config: Config, resolved: string): Promise<number> {
   const url = daemonUrl(config.host, config.port)
   const health = await probe(url)
   const holder = await inspect(lockPath()).catch(() => null)
 
   const report: DaemonStatus = {
-    config: configPath,
-    configCandidates: configCandidates(),
+    config: resolved,
     configDir: configDir(),
     // Plugins use this configured URL instead of deriving their own.
     url,
@@ -149,14 +160,8 @@ async function cmdStatus(config: Config, configPath: string): Promise<number> {
 }
 
 async function cmdConfigPath(): Promise<number> {
-  // Include the bundled template in the search, as loadConfig does.
-  const candidates = configCandidates()
-  const inUse = candidates.find((p) => existsSync(p))
-  if (inUse) {
-    process.stdout.write(inUse + "\n")
-  } else {
-    process.stdout.write(`${candidates[0]}\n(no config exists; onesystem would use ${candidates[1]})\n`)
-  }
+  const file = configPath()
+  process.stdout.write(existsSync(file) ? file + "\n" : `${file}\n(no config exists)\n`)
   return 0
 }
 

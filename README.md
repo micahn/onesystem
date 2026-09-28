@@ -102,8 +102,10 @@ Its paths are placeholders; `install <model>` writes the real paths.
 
 - `stdio-mcp`: onesystem starts and stops a local MCP process. Used by laya and julia.
 - `systemone-http`: forwards a `systemone` tool to an existing `POST /v1/systemone`
-  service, such as rev. Start that service separately. The adapter passes the body
-  through; its schema has not been checked against a live service.
+  service. Add one to your own config if you have such a service; it is not in the shipped
+  template, since a disabled entry in everyone's config is not a feature. Start the service
+  separately. The adapter passes the body through; its schema has not been checked against
+  a live service.
 
 Each `stdio-mcp` backend must declare `tools` without its `toolPrefix`. The daemon
 serves this list without starting the model. Update it when a backend adds or renames

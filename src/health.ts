@@ -17,8 +17,6 @@ import type { RoutingConfig } from "./routing.ts"
 export interface DaemonStatus {
   /** The config file in use. */
   config: string
-  /** Every path that would be tried, in order. */
-  configCandidates: string[]
   configDir: string
   /** Base URL the daemon answers on. */
   url: string
