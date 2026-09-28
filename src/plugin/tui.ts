@@ -86,7 +86,11 @@ export default Plugin.define({
   id: "onesystem",
 
   setup(ctx) {
+    // Two signals from one poll. The footer wants one line; the sidebar card wants the
+    // per-backend detail. A second poll interval would be a second chance for them to
+    // disagree about what the daemon is doing.
     const [line, setLine] = createSignal<Line>({ text: "onesystem: …", tone: "info" })
+    const [report, setReport] = createSignal<HealthReport | null>(null)
 
     const cli = defaultCli()
     let base: string | null = null
@@ -102,7 +106,9 @@ export default Plugin.define({
           return
         }
       }
-      setLine(statusLine(await probeHealth(base)))
+      const health = await probeHealth(base)
+      setReport(health)
+      setLine(statusLine(health))
     }
 
     // The re-entrancy guard lives here and only here. It also lived at the top of
@@ -186,6 +192,62 @@ export default Plugin.define({
     // there is no reactive owner yet. So the command is registered there, once.
     let registered = false
 
+    /**
+     * The sidebar card.
+     *
+     * What belongs here and what does not: the things that change on their own and that
+     * you would otherwise have to open a terminal to check. So the per-model state, and
+     * how long until the daemon gives the GPU back — which is the one number whose answer
+     * changes without the user doing anything, and the reason the idle window exists.
+     *
+     * Not model accuracy, not VRAM, not a benchmark. A status card that starts making
+     * claims about quality is a dashboard nobody trusts.
+     */
+    const card = ctx.ui.slot({
+      append: "sidebar.content",
+      render: () => {
+        const h = report()
+        if (!h) {
+          return jsx("text", { fg: ctx.theme.text.feedback.error.base, children: "onesystem: not running" })
+        }
+        const n = h.backends.length
+        const warm = h.backends.filter((b) => b.state === "warm").length
+        const quietest = h.backends
+          .filter((b) => b.local)
+          .reduce<number | null>((min, b) => (min === null || b.idleMs < min ? b.idleMs : min), null)
+        const idleLeft = quietest === null ? null : Math.max(0, h.idleShutdownSecs * 1000 - quietest)
+
+        const rows: unknown[] = [
+          jsx("text", {
+            fg: ctx.theme.text.base,
+            children: `onesystem  ${warm}/${n} warm`,
+          }),
+        ]
+        for (const b of h.backends) {
+          rows.push(
+            jsx("text", {
+              fg:
+                b.state === "failed"
+                  ? ctx.theme.text.feedback.error.base
+                  : b.state === "warm"
+                    ? ctx.theme.text.feedback.success.base
+                    : ctx.theme.text.muted,
+              children: `  ${b.name} ${b.state}${b.inflight > 0 ? ` (${b.inflight})` : ""}`,
+            }),
+          )
+        }
+        if (idleLeft !== null) {
+          rows.push(
+            jsx("text", {
+              fg: ctx.theme.text.muted,
+              children: idleLeft === 0 ? "  winding down" : `  idle in ${Math.round(idleLeft / 1000)}s`,
+            }),
+          )
+        }
+        return jsx("box", { flexDirection: "column", children: rows })
+      },
+    })
+
     const dispose = ctx.ui.slot({
       append: "prompt.footer.status",
       render: () => {
@@ -231,6 +293,7 @@ export default Plugin.define({
 
     return async () => {
       clearInterval(timer)
+      card()
       dispose()
       pluginLog("status line disposed")
     }

@@ -49,6 +49,7 @@ import { Plugin } from "@opencode/plugin"
 import { healthy } from "../health.ts"
 import { resolve as resolveRouting } from "../routing.ts"
 import { askDaemon, defaultCli, pluginLog, run } from "./discover.ts"
+import { registerTools } from "./tools.ts"
 
 const log = pluginLog
 
@@ -139,28 +140,11 @@ export default Plugin.define({
       })
       return async () => {}
     }
-    // Only fall back to a guessed name when we could not ask. Guessing is worse than
-    // nothing — a server registered under a name the daemon does not serve 404s on every
-    // call — so it is logged, and the guess is a plain literal rather than a default
-    // dressed up as a discovery.
-    const configured = answer?.registrations ?? []
-    const targets = configured.length > 0 ? configured : [{ backend: "laya", serverName: "onesystem" }]
-    if (configured.length === 0) {
-      log("daemon reported no backends; falling back to a guessed target", {
-        target: targets[0]!.serverName,
-      })
-    }
-
     // Routing, when the config asks for it. With one backend this returns null and the
-    // per-backend names below stand, which is the point: a routing config that cannot
+    // daemon's own tool names stand, which is the point: a routing config that cannot
     // route should not change anything.
+    const configured = answer?.registrations ?? []
     const route = resolveRouting(answer?.routing, configured)
-    const named = route
-      ? [
-          { backend: route.preferred, serverName: route.preferredServerName },
-          ...route.others,
-        ]
-      : targets
     if (route) {
       log("routing is on", { preferred: route.preferred, others: route.others.map((o) => o.backend) })
       if (route.guidance.length > 0) {
@@ -171,20 +155,22 @@ export default Plugin.define({
       }
     }
 
-    const serverNames = named.map((t) => t.serverName)
-
-    const registration = await ctx.mcp.transform((editor) => {
-      for (const { backend, serverName } of named) {
-        editor.set(serverName, {
-          type: "remote",
-          url: `${base}/mcp/${backend}`,
-          // Loopback-only service with no auth. OAuth is for remote servers; enabling
-          // it here would just make every session stop and ask for credentials.
-          oauth: false,
-          timeout: { startup: startupMs, catalog: catalogMs, execution: executionMs },
-        } as never)
-      }
-    })
+    // Registered as native tools rather than as MCP servers. The daemon still speaks MCP
+    // -- that is the interchange format for this model class, and it is what the catalog
+    // is read from -- but opencode hosts the tools itself, so the sidebar shows one
+    // service rather than one per model.
+    let registration: { dispose(): Promise<void>; names: string[]; unreachable: { backend: string; error: string }[] }
+    try {
+      registration = await registerTools(ctx, base, route?.preferred)
+    } catch (err) {
+      log("could not register tools", { error: String(err) })
+      return async () => {}
+    }
+    if (registration.names.length === 0) {
+      log("the daemon reported no tools; registering nothing")
+      return async () => {}
+    }
+    const serverNames = registration.names
 
     // ## Coming back after the daemon has exited
     //
@@ -216,10 +202,10 @@ export default Plugin.define({
           log("restart failed; this call will report a connection error", { code })
           return false
         }
-        // The client is still holding the MCP session id of the daemon that exited, so
-        // the call it is about to make comes back as "session expired" and only
-        // reconnects afterwards. Reloading drops that stale session first.
-        await ctx.mcp.reload().catch((err) => log("mcp reload failed", { error: String(err) }))
+        // Nothing else to do. Under the MCP registration there was a stale session id to
+        // drop here, which is why this path used to reload the MCP client; a natively
+        // registered tool makes a fresh request each call, so a restarted daemon is simply
+        // answered on the next one.
         return true
       })().finally(() => {
         inflight = null
@@ -234,7 +220,7 @@ export default Plugin.define({
           await ensureUp()
         })
 
-    log("registered backends", { targets: serverNames, base, startupMs, recovery: !options.noStart })
+    log("registered tools", { tools: serverNames, base, recovery: !options.noStart })
 
     return async () => {
       // Registration only. The daemon is shared and outlives any single session; see

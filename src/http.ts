@@ -34,6 +34,23 @@
  * previous signature took the concrete `Supervisor` class, which meant the one module
  * that had a real seam never exposed it and every routing test needed a live child
  * process.
+ *
+ * ## Two front doors, on purpose
+ *
+ * The JSON endpoints (`/catalog`, `/call`) and the MCP endpoint (`/mcp/:backend`) are the
+ * same daemon. They exist because the two have different readers:
+ *
+ *   - opencode talks to `/catalog` and `/call`, because the plugin can register a tool
+ *     directly. Going through MCP to reach a tool opencode can already host natively costs
+ *     a protocol layer and puts a server in the user's sidebar per backend, which is
+ *     exactly the clutter worth removing.
+ *   - Anything else — a script, a benchmark harness, a different client — talks MCP,
+ *     which is the interchange format for this class of model and the one laya itself
+ *     speaks.
+ *
+ * The schemas are never hand-written. `/catalog` forwards the backend's own `tools/list`,
+ * so the tool definitions opencode sees are the ones the model actually publishes, and a
+ * model that changes its surface does not need a matching edit here.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
@@ -204,6 +221,57 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
       return
     }
 
+    if (url.pathname === "/catalog" && req.method === "GET") {
+      // The tool surface, per backend, straight from the models. For a client that can
+      // register tools itself and does not want an MCP server in its UI.
+      const backendsOut = await Promise.all(
+        backends.names().map(async (name) => {
+          const backend = backends.get(name)
+          let tools: unknown = []
+          let error: string | undefined
+          try {
+            tools = await backends.call(name, "tools/list", {})
+          } catch (err) {
+            // One backend that cannot be reached must not hide the others. The plugin
+            // registers what it can and reports the rest, rather than registering nothing.
+            error = describeError(err)
+          }
+          return { backend: name, toolPrefix: backend.toolPrefix, tools, error }
+        }),
+      )
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ backends: backendsOut }))
+      return
+    }
+
+    if (url.pathname === "/call" && req.method === "POST") {
+      const body = (await readJsonBody(req)) as { backend?: string; tool?: string; arguments?: unknown }
+      if (typeof body?.backend !== "string" || typeof body.tool !== "string") {
+        throw Object.assign(new Error("expected { backend, tool, arguments }"), { status: 400 })
+      }
+      if (!backends.names().includes(body.backend)) {
+        res.writeHead(404, { "content-type": "application/json" })
+        res.end(
+          JSON.stringify({
+            error: "unknown_backend",
+            message: `no backend named ${body.backend}; configured: ${backends.names().join(", ") || "none"}`,
+          }),
+        )
+        return
+      }
+      // The caller's disconnect, the same signal the MCP path uses, so a session that
+      // gives up does not leave a model call running.
+      const result = await backends.call(
+        body.backend,
+        "tools/call",
+        { name: body.tool, arguments: body.arguments ?? {} },
+        clientDisconnect(req, res).signal,
+      )
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ result }))
+      return
+    }
+
     const match = url.pathname.match(/^\/mcp\/([A-Za-z0-9_-]+)$/)
     if (match) {
       const backendName = match[1]!
@@ -232,7 +300,7 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     res.end(
       JSON.stringify({
         error: "not_found",
-        message: "POST /mcp/:backend, or GET /health",
+        message: "GET /health, GET /catalog, POST /call, or POST /mcp/:backend",
         backends: backends.names(),
       }),
     )
