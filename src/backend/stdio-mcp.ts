@@ -113,6 +113,15 @@ export class StdioMcpBackend implements Backend {
   }
 
   /**
+   * Declared in config, never asked of the child. See `Backend#tools` for why the two
+   * facts cannot be the same one: reading this from the process would make session start
+   * pay the model load, which is the whole thing the supervisor exists to avoid.
+   */
+  get tools(): readonly string[] {
+    return this.spec.tools
+  }
+
+  /**
    * Start the child and complete the handshake. Lazy, expensive, and idempotent:
    * concurrent callers share one start, and an already-warm backend is a no-op.
    */

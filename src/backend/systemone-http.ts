@@ -65,6 +65,21 @@ export class SystemOneBackendImpl implements Backend {
     return this.spec.toolPrefix
   }
 
+  /**
+   * Read off the same list the adapter answers `tools/list` with.
+   *
+   * This transport needs no declared list in config, because it has no child process to
+   * start: the surface is a constant right here. Deriving from `systemoneToolList` rather
+   * than repeating the name keeps the two from drifting, which is the one thing a tool
+   * surface must not do — a catalog advertising a name `call` will refuse.
+   */
+  get tools(): readonly string[] {
+    const list = systemoneToolList() as { tools?: { name?: unknown }[] }
+    return (list.tools ?? [])
+      .map((t) => t.name)
+      .filter((name): name is string => typeof name === "string")
+  }
+
   /** No-op, and not merely because it is cheap: there is no process to own. */
   async start(): Promise<void> {
     this.#lastActivityAt = this.#now()

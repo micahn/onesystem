@@ -109,6 +109,19 @@ export interface Backend {
    */
   readonly toolPrefix?: string
   /**
+   * The tool names this backend exposes, without the product prefix. Must not load.
+   *
+   * Declared rather than discovered, because discovering it means starting the process,
+   * and starting the process is the one thing this project refuses to do on a path the
+   * agent did not ask for. `GET /catalog` reads this to hand the opencode plugin a tool
+   * surface at session start, which is the only reason it exists.
+   *
+   * A backend that answers `tools/list` from somewhere other than a child process —
+   * `systemone-http` synthesises its own list — reads it from there instead, so the
+   * contract is "the surface", not "the config".
+   */
+  readonly tools: readonly string[]
+  /**
    * Forward one MCP method to the backend and return its JSON-RPC result.
    * Rejects on a backend error; never returns a partial success.
    *

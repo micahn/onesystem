@@ -48,9 +48,11 @@
  *     which is the interchange format for this class of model and the one laya itself
  *     speaks.
  *
- * The schemas are never hand-written. `/catalog` forwards the backend's own `tools/list`,
- * so the tool definitions opencode sees are the ones the model actually publishes, and a
- * model that changes its surface does not need a matching edit here.
+ * The schemas are not read from the model. The MCP route forwards `tools/list` and so
+ * does publish what the model actually exposes — but reaching it costs a process start,
+ * and `/catalog` must answer before anything is loaded, so that surface is declared in
+ * config and served from there. A model that changes its surface needs a config edit, and
+ * the call-time schema check is what catches it having not been made.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
@@ -222,23 +224,40 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     }
 
     if (url.pathname === "/catalog" && req.method === "GET") {
-      // The tool surface, per backend, straight from the models. For a client that can
-      // register tools itself and does not want an MCP server in its UI.
-      const backendsOut = await Promise.all(
-        backends.names().map(async (name) => {
-          const backend = backends.get(name)
-          let tools: unknown = []
-          let error: string | undefined
-          try {
-            tools = await backends.call(name, "tools/list", {})
-          } catch (err) {
-            // One backend that cannot be reached must not hide the others. The plugin
-            // registers what it can and reports the rest, rather than registering nothing.
-            error = describeError(err)
-          }
-          return { backend: name, toolPrefix: backend.toolPrefix, tools, error }
-        }),
-      )
+      // The tool surface, per backend — read, never forwarded.
+      //
+      // This endpoint used to call `tools/list` on every backend through the supervisor,
+      // which cold-starts a process, so the opencode plugin's `setup` was a `Promise.all`
+      // of 20-54s model loads paid before the agent had asked anything. That is the exact
+      // cost the lazy-start contract exists to keep off that path, and the plugin's own
+      // header comment claimed the opposite of what its call chain did. The surface now
+      // comes from each backend's declared `tools`, which reads no process at all.
+      //
+      // Names are reported *prefixed* even though the declaration is bare, so the plugin's
+      // existing strip-on-the-way-out logic still produces the name opencode registers, and
+      // a `/call` still carries the wire name the backend answers to. The prefix stays
+      // authoritative in exactly one place: the backend that owns it.
+      const backendsOut = backends.names().map((name) => {
+        const backend = backends.get(name)
+        const prefix = backend.toolPrefix ?? ""
+        return {
+          backend: name,
+          toolPrefix: backend.toolPrefix,
+          tools: {
+            tools: backend.tools.map((tool) => ({
+              name: prefix + tool,
+              // A pass-through on purpose. The model publishes its own schema over MCP and
+              // inventing field names here would be a second, silent description of it —
+              // worse than an honest envelope. `tools/call` forwards the arguments
+              // verbatim, so the model's real schema is what validates them.
+              description:
+                `${name} ${tool}. Forwards its arguments to ${name} unchanged; see the ` +
+                `backend's own tools/list for the authoritative schema.`,
+              inputSchema: { type: "object", additionalProperties: true },
+            })),
+          },
+        }
+      })
       res.writeHead(200, { "content-type": "application/json" })
       res.end(JSON.stringify({ backends: backendsOut }))
       return

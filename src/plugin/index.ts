@@ -16,6 +16,13 @@
  * VRAM. The first time an agent actually calls a tool, the backend starts, and that
  * cost lands on the call that wanted it.
  *
+ * That claim used to be false, and the second half of this file used to say so. Setup
+ * called `GET /catalog` to learn the tool surface, `/catalog` forwarded `tools/list` to
+ * each backend, and forwarding starts the process — so opening a session was a
+ * `Promise.all` of model loads, one per enabled backend, paid before the agent had asked
+ * anything. The tool surface is declared in config now and `/catalog` reads it without
+ * touching a process. `test/lazy.test.ts` pins the difference.
+ *
  * ## How the plugin learns what to register
  *
  * It asks. `onesystem status` prints a `DaemonStatus`, and that one payload carries both
@@ -29,13 +36,6 @@
  * was listening on: indistinguishable, to the user, from "Unable to connect" on a daemon
  * that had not started yet. `ONESYSTEM_PORT` survives only as an explicit override, and
  * it is validated now instead of being `Number(...)`-ed into `http://host:NaN`.
- *
- * The startup timeout
- *
- * A cold `initialize` triggers the model load. opencode's default `mcp.timeout.startup`
- * is 30 seconds, which is shorter than a cold load, so without the override below a
- * cold backend reads as a failed MCP server. `startupMs` is set well above the
- * measured worst case and `executionMs` above the old shim's 120s per-call ceiling.
  *
  * ## Cleanup
  *
@@ -54,19 +54,23 @@ import { registerTools } from "./tools.ts"
 const log = pluginLog
 
 /**
- * MCP timeouts for the servers we register.
+ * MCP timeouts.
  *
- * opencode's default `mcp.timeout.startup` is 30s, shorter than a cold load, so without
- * these a cold backend reads as a failed MCP server. Measured on this machine: a cold
- * `laya` load is 20-54s, and the shim is silent for another 25-30s while it imports
- * transformers before it binds stdio.
+ * There are none, and there used to be three. `startupMs`, `catalogMs` and `executionMs`
+ * were overrides for registering remote MCP servers with extended timeouts, because
+ * opencode's default `mcp.timeout.startup` of 30s is shorter than a cold load. Tools are
+ * registered natively now, so no MCP server is registered and nothing overrides a host
+ * timeout: the three were read into locals at setup and never used again, which is
+ * interface left over from the MCP era and the kind that invites someone to "fix" it by
+ * wiring it up.
+ *
+ * The request budget the dead `executionMs` used to describe now lives in one place, the
+ * config's `requestTimeoutSecs`, enforced by the supervisor on the daemon side. The
+ * plugin's own one live call is `GET /catalog`, which reads no process and is bounded by
+ * `CATALOG_TIMEOUT_MS` below.
  */
-const DEFAULTS = {
-  startupMs: 180_000,
-  catalogMs: 60_000,
-  // Matches LAYA_TOOL_TIMEOUT_SECS, the ceiling the shim enforces on a single call.
-  executionMs: 120_000,
-}
+
+const CATALOG_TIMEOUT_MS = 10_000
 
 export interface OnesystemOptions {
   /**
@@ -78,10 +82,6 @@ export interface OnesystemOptions {
   args?: string[]
   /** Skip starting the daemon; just register the servers. Useful in CI. */
   noStart?: boolean
-  /** Override the per-server MCP timeouts, in ms. */
-  startupMs?: number
-  catalogMs?: number
-  executionMs?: number
 }
 
 /**
@@ -118,9 +118,6 @@ export default Plugin.define({
     const fallback = defaultCli()
     const command = options.command ?? fallback.command
     const args = options.args ?? fallback.args
-    const startupMs = options.startupMs ?? DEFAULTS.startupMs
-    const catalogMs = options.catalogMs ?? DEFAULTS.catalogMs
-    const executionMs = options.executionMs ?? DEFAULTS.executionMs
 
     if (!options.noStart) {
       // Race-safe: concurrent sessions all call this, exactly one daemon results, and
@@ -161,7 +158,7 @@ export default Plugin.define({
     // service rather than one per model.
     let registration: { dispose(): Promise<void>; names: string[]; unreachable: { backend: string; error: string }[] }
     try {
-      registration = await registerTools(ctx, base, route?.preferred)
+      registration = await registerTools(ctx, base, route?.preferred, CATALOG_TIMEOUT_MS)
     } catch (err) {
       log("could not register tools", { error: String(err) })
       return async () => {}

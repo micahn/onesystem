@@ -59,6 +59,23 @@ echo "VRAM $(mb "$V1")   onesystem-owned laya procs $L1"
 if [ "$L1" -ne 0 ]; then echo "FAIL: start spawned laya ($L1); it must stay lazy"; exit 1; else echo "OK: no laya process spawned"; fi
 
 echo
+echo "=== GET /catalog (must NOT load a model either) ==="
+# The one endpoint that used to break the invariant. The plugin reads this at session
+# start to learn the tool surface, and it used to forward `tools/list` to each backend --
+# so opening a session loaded every model before the agent asked anything. The surface is
+# declared in config now and read from there.
+CAT=$(curl -s --max-time 5 "${URL}/catalog")
+echo "catalog tools: $(echo "$CAT" | sed 's/\\//g' | grep -oP '"name":\s*"\K[^"]+' | tr '\n' ' ')"
+V_CAT=$(vram); L_CAT=$(owned_laya)
+echo "VRAM $(mb "$V_CAT")   onesystem-owned laya procs $L_CAT"
+if [ "$L_CAT" -ne 0 ]; then
+  echo "FAIL: /catalog spawned laya ($L_CAT); session start must not load a model"
+  exit 1
+else
+  echo "OK: /catalog loaded nothing"
+fi
+
+echo
 echo "=== health (backend must be cold) ==="
 curl -s "${URL}/health" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("anyLocalWarm:", d["anyLocalWarm"]); [print(" ", b["name"], b["state"]) for b in d["backends"]]'
 

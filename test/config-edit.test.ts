@@ -33,12 +33,14 @@ const SAMPLE = `{
     "laya": {
       "transport": "stdio-mcp",
       "command": ["x"],
+      "tools": ["predict", "status"],
       // keep this, it is the whole point
       "toolPrefix": "laya_"
     },
     "julia": {
       "transport": "stdio-mcp",
       "command": ["y"],
+      "tools": ["predict"],
       "enabled": false
     }
   }

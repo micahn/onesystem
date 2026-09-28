@@ -40,6 +40,9 @@ function prefixedConfig(port: number, marker: string, toolPrefix?: string): Conf
           env: { FAKE_MCP_MARKER: marker, FAKE_MCP_TOOL: "fake_decide" },
           toolPrefix,
           startupTimeoutSecs: 30,
+          // The declared surface is bare; `toolPrefix` puts the wire name back, which is
+          // what the catalog reports and what `/call` must carry.
+          tools: ["decide"],
         },
       },
     },
@@ -116,8 +119,8 @@ describe("tool naming", () => {
 
 describe("server naming", () => {
   const base = {
-    a: { transport: "stdio-mcp", command: ["x"] },
-    b: { transport: "stdio-mcp", command: ["x"] },
+    a: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
+    b: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
   }
 
   test("a single enabled backend gets the clean name", () => {

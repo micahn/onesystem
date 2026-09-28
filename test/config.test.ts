@@ -26,7 +26,7 @@ describe("config validation", () => {
     const config = validate(
       {
         backends: {
-          laya: { transport: "stdio-mcp", command: ["python", "-m", "laya.mcp.server"] },
+          laya: { transport: "stdio-mcp", command: ["python", "-m", "laya.mcp.server"], tools: ["predict"] },
           rev: { transport: "systemone-http", baseUrl: "http://127.0.0.1:8000/" },
         },
       },
@@ -42,8 +42,8 @@ describe("config validation", () => {
     const config = validate(
       {
         backends: {
-          on: { transport: "stdio-mcp", command: ["x"] },
-          off: { transport: "stdio-mcp", command: ["x"], enabled: false },
+          on: { transport: "stdio-mcp", command: ["x"], tools: ["predict"] },
+          off: { transport: "stdio-mcp", command: ["x"], tools: ["predict"], enabled: false },
         },
       },
       "test",
@@ -57,14 +57,44 @@ describe("config validation", () => {
   })
 
   test("rejects a stdio backend with no command", () => {
-    expect(() => validate({ backends: { x: { transport: "stdio-mcp" } } }, "test")).toThrow(/command/)
-    expect(() => validate({ backends: { x: { transport: "stdio-mcp", command: [] } } }, "test")).toThrow(/command/)
+    expect(() => validate({ backends: { x: { transport: "stdio-mcp", tools: ["predict"] } } }, "test")).toThrow(
+      /command/,
+    )
+    expect(
+      () => validate({ backends: { x: { transport: "stdio-mcp", command: [], tools: ["predict"] } } }, "test"),
+    ).toThrow(/command/)
   })
 
   test("rejects a stdio command that is not all strings", () => {
-    expect(() => validate({ backends: { x: { transport: "stdio-mcp", command: ["py", 3] } } }, "test")).toThrow(
-      /command/,
-    )
+    expect(
+      () => validate({ backends: { x: { transport: "stdio-mcp", command: ["py", 3], tools: ["predict"] } } }, "test"),
+    ).toThrow(/command/)
+  })
+
+  test("rejects a stdio backend that declares no tools", () => {
+    // The declared surface is the only way onesystem can hand a session its tools without
+    // loading a model, so an empty list is not a default to fill in — it is a session
+    // that registers nothing, with a healthy daemon and nothing in the logs to say why.
+    expect(() => validate({ backends: { x: { transport: "stdio-mcp", command: ["x"] } } }, "test")).toThrow(/tools/)
+    expect(
+      () => validate({ backends: { x: { transport: "stdio-mcp", command: ["x"], tools: [] } } }, "test"),
+    ).toThrow(/tools/)
+    expect(
+      () => validate({ backends: { x: { transport: "stdio-mcp", command: ["x"], tools: ["ok", ""] } } }, "test"),
+    ).toThrow(/tools/)
+  })
+
+  test("the error names what to add, and why it cannot be discovered", () => {
+    // A refusal that does not say what to do next is a refusal people work around by
+    // deleting the backend, which loses the tool surface entirely and silently.
+    let message = ""
+    try {
+      validate({ backends: { x: { transport: "stdio-mcp", command: ["x"] } } }, "my-config.json")
+    } catch (err) {
+      message = (err as Error).message
+    }
+    expect(message).toContain("my-config.json: backends.x.tools")
+    expect(message).toContain("cannot discover these at startup")
   })
 
   test("rejects a systemone backend with a non-http baseUrl", () => {
@@ -110,8 +140,8 @@ describe("config validation", () => {
   })
 
   test("names the offending field and the source in the message", () => {
-    expect(() => validate({ backends: { laya: { transport: "stdio-mcp" } } }, "my-config.json")).toThrow(
-      /my-config\.json.*backends\.laya\.command/s,
-    )
+    expect(
+      () => validate({ backends: { laya: { transport: "stdio-mcp", tools: ["predict"] } } }, "my-config.json"),
+    ).toThrow(/my-config\.json.*backends\.laya\.command/s)
   })
 })

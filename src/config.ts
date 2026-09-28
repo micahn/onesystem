@@ -56,6 +56,24 @@ export interface StdioBackend extends BackendNaming {
   cwd?: string
   /** Handshake budget for spawning this process and completing `initialize`. */
   startupTimeoutSecs?: number
+  /**
+   * The tool names this backend exposes, without the product prefix.
+   *
+   * Required, and this is the one place a model surface is written down by hand. It used
+   * to be read from the model's own `tools/list` at session start, which is a
+   * contradiction this project's central property cannot survive: asking the model *is*
+   * the 20-54s load and 3 GB of VRAM that the lazy-start contract exists to keep off a
+   * path the agent did not ask for. So the surface is declared here, and the daemon hands
+   * it out without loading anything.
+   *
+   * The trade is real and worth stating plainly. laya went from 0.3.10 to 0.3.21 during
+   * development and added a tool, so this list can go stale against a release. When it
+   * does, a name here that the process does not answer fails the call with the backend's
+   * own "unknown tool" rather than silently doing nothing — which is the failure mode this
+   * list exists to prefer over a session that loads three gigabytes of torch before the
+   * agent has typed anything.
+   */
+  tools: string[]
 }
 
 export interface SystemOneBackend extends BackendNaming {
@@ -263,6 +281,22 @@ export function validate(raw: unknown, source: string): Config {
           `${source}: backends.${name}.command must be a non-empty string array for a stdio-mcp backend`,
         )
       }
+      // Required rather than defaulted. The tool surface cannot be discovered without
+      // starting the process, and starting the process is the cost the lazy-start contract
+      // forbids on this path — so an empty list here would mean a session that registers
+      // no tools, with a healthy daemon and no error to explain it. That is the silent
+      // failure worth refusing instead.
+      const tools = entry.tools
+      if (!Array.isArray(tools) || tools.length === 0 || tools.some((t) => typeof t !== "string" || t.length === 0)) {
+        throw new Error(
+          `${source}: backends.${name}.tools must be a non-empty string array, naming the tools ` +
+            `this backend exposes without its product prefix (e.g. ["predict", "status"]).\n` +
+            `onesystem cannot discover these at startup: reading them from the model is the ` +
+            `20-54s load and 3 GB of VRAM that lazy start exists to avoid, so they are ` +
+            `declared here. Run \`onesystem status\` after a first call to see what the model ` +
+            `actually publishes, and add anything missing here.`,
+        )
+      }
       backends[name] = {
         transport,
         command: command as string[],
@@ -275,6 +309,7 @@ export function validate(raw: unknown, source: string): Config {
         ),
         toolPrefix: entry.toolPrefix as string | undefined,
         serverName: entry.serverName as string | undefined,
+        tools: tools as string[],
         enabled: entry.enabled !== false,
       }
     } else if (transport === "systemone-http") {

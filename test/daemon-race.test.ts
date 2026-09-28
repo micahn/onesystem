@@ -224,7 +224,9 @@ describe("the start/exit-code contract", () => {
       configPath,
       JSON.stringify({
         port: 9999,
-        backends: { mine: { transport: "stdio-mcp", command: ["/bin/true"], toolPrefix: "mine_" } },
+        backends: {
+          mine: { transport: "stdio-mcp", command: ["/bin/true"], toolPrefix: "mine_", tools: ["predict"] },
+        },
       }),
     )
     const env = { ONESYSTEM_CONFIG_DIR: dir, ONESYSTEM_STATE_DIR: dir }

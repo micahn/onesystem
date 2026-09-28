@@ -56,7 +56,7 @@ function configFor(backends: Record<string, unknown>, extra: Record<string, unkn
 }
 
 function stdio(name: string): Record<string, unknown> {
-  return { transport: "stdio-mcp", command: ["/bin/true"] }
+  return { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"] }
 }
 
 describe("the backend seam", () => {
@@ -117,6 +117,7 @@ describe("quiesce during a cold start", () => {
       command: [process.execPath, fixture],
       env: { FAKE_MCP_MARKER: marker, FAKE_MCP_HANDSHAKE_MS: "1200", FAKE_MCP_LINGER_MS: "30000" },
       startupTimeoutSecs: 30,
+      tools: ["decide"],
     })
 
     // The catch is attached now, not later: a quiesce mid-handshake is *supposed* to make
@@ -162,6 +163,7 @@ describe("quiesce during a cold start", () => {
       command: [process.execPath, fixture],
       env: { FAKE_MCP_MARKER: marker, FAKE_MCP_HANDSHAKE_MS: "800" },
       startupTimeoutSecs: 30,
+      tools: ["decide"],
     })
 
     const call = backend.call({ method: "tools/list", params: {} }).then(

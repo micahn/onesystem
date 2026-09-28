@@ -60,6 +60,34 @@
       // mutable thing that anything on the machine can upgrade out from under the
       // model, and the ROCm torch build inside it is the part that must not move.
       "command": ["/path/to/bin/laya-mcp-idle-server"],
+
+      // The tool names this backend exposes, without the `laya_` prefix. Required, and
+      // the one place a model's surface is written down by hand.
+      //
+      // onesystem cannot discover these at startup. Reading them means forwarding
+      // `tools/list` to the process, and that is the 20-54s load and 3 GB of VRAM that
+      // lazy start exists to keep off session start -- so setup would cost a model load
+      // per backend before the agent asked anything. Declared here, `/catalog` answers
+      // without touching a process.
+      //
+      // If laya adds or renames a tool, add it here. A name here the process does not
+      // answer fails the call with its own "unknown tool", which is loud at the moment of
+      // the call rather than silent at session start.
+      //
+      // Measured against laya 0.3.21 on this machine, via its own `tools/list`:
+      //
+      //   onesystem status | onesystem route | onesystem predict | onesystem predict_batch
+      //   onesystem route_batch | onesystem shortlist | onesystem preset | onesystem decide
+      "tools": [
+        "predict",
+        "status",
+        "route",
+        "decide",
+        "shortlist",
+        "preset",
+        "predict_batch",
+        "route_batch"
+      ],
       "env": {
         "LAYA_DEVICE": "cuda",
         "LAYA_PRELOAD": "0",
@@ -100,6 +128,7 @@
       "startupTimeoutSecs": 120,
       // No toolPrefix: the shim names its tool `predict`, which is what opencode should
       // see. A prefix is only for stripping a name a model puts on its own tools.
+      "tools": ["predict"],
       "enabled": false
     },
 

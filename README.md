@@ -119,6 +119,32 @@ version.
 | `requestTimeoutSecs` | `120` | Ceiling on one forwarded call. |
 | `backends` | `{}` | See below. |
 
+### The declared tool surface
+
+Every `stdio-mcp` backend needs a `tools` list naming the tools it exposes, without its
+product prefix. This is the one place a model's surface is written down by hand:
+
+```jsonc
+"laya": {
+  "transport": "stdio-mcp",
+  "command": ["/path/to/bin/laya-mcp-idle-server"],
+  "toolPrefix": "laya_",
+  "tools": ["predict", "status", "route", "decide"]
+}
+```
+
+It is declared because it cannot be discovered. Reading the tool list means forwarding
+`tools/list` to the process, and that is the 20-54s load and 3 GB of VRAM that lazy start
+exists to keep off session start — so a session that discovered its own tools would load
+every model before the agent asked anything. The daemon serves the declared list from
+`/catalog` without touching a process.
+
+The trade is real: if a model adds or renames a tool, the list needs a matching edit. A
+name the process does not answer fails the call with the backend's own "unknown tool",
+which is loud at the moment of the call — the preferable failure to a session start that
+quietly costs three gigabytes. After a first call, `onesystem status` shows what the
+model actually publishes.
+
 ### Naming
 
 The MCP server is registered as `onesystem`, and each backend's `toolPrefix` is stripped
@@ -204,10 +230,15 @@ comes back, and it comes back cold.
 
 ## Timeouts
 
-A cold `initialize` pays the model load, which is longer than opencode's default
-`mcp.timeout.startup` of 30s. Left alone, a cold backend reads as a failed MCP server.
-The plugin therefore registers every server with `startup: 180_000`, `catalog: 60_000`,
-and `execution: 120_000`. Override with plugin options if your backend is slower or faster.
+There is one request budget, `requestTimeoutSecs`, enforced by the supervisor on the
+daemon side and passed down to the adapter so it can hand the same number to a library
+that wants one. opencode's MCP startup timeout does not apply: the plugin registers
+tools natively rather than as remote MCP servers, so nothing is negotiated at connect
+time and no host timeout has to be extended to cover a cold load.
+
+`GET /catalog` — the one call the plugin makes at setup — loads nothing and is bounded
+inside the plugin, so a daemon that accepts a connection and then stops answering cannot
+hold session start open.
 
 ## Tests
 
@@ -224,9 +255,11 @@ The tests worth knowing about:
   Fixed with a grace window that treats an unreadable record as a create in flight.
 - **`lazy.test.ts`** starts a real daemon against a real MCP child and watches a marker
   file the child writes on spawn. This is what pins "nothing loads until the first
-  request". It also caught a second real bug: `#everWarm` was set while reading backend
-  state *before* the forward, where a first request always looks cold, so a service that
-  only ever saw one request never shut down.
+  request", and it pins it twice over: once for `GET /catalog` and once for the whole
+  plugin setup path, which are the two things that used to spawn a model before the agent
+  had asked anything. It also caught a second real bug: `#everWarm` was set while reading
+  backend state *before* the forward, where a first request always looks cold, so a
+  service that only ever saw one request never shut down.
 - **`e2e-laya.sh`** asserts `device: cuda` explicitly. Asserting on timing is not enough;
   an early version passed while every call was failing, because the shim had died on a
   missing `LAYA_PYTHON` and the bridge returned error payloads quickly.

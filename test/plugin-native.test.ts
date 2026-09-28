@@ -97,11 +97,16 @@ describe("tools are registered natively, not as MCP servers", () => {
     expect(h.toolNames).toEqual(["predict", "status"])
   })
 
-  test("the schema is the model's own, passed straight through", async () => {
+  test("the catalog's schema is registered unchanged, not re-authored here", async () => {
     const h = await harness()
     const predict = h.registered.find((r) => r.name === "predict")!
-    // Not a hand-written approximation. laya changed its surface during this project, and
-    // a copy here would have been wrong within a release.
+    // The plugin does not invent or translate a schema — whatever `/catalog` declares is
+    // what opencode is handed. This used to be described as "the model's own, passed
+    // straight through", and the difference is the whole of issue #1: the catalog is now a
+    // surface declared in config rather than one read from a running model, because
+    // reading it from the model is the load that must not happen at session start. The
+    // property this test actually protects — no second description of the schema on the
+    // plugin side — is unchanged by that. `test/lazy.test.ts` pins the other half.
     expect(predict.input).toEqual(STUB_TOOLS.laya.tools.tools[0]!.inputSchema)
     expect(predict.description).toBe("Answer typed questions.")
   })

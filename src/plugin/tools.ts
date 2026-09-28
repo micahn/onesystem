@@ -13,14 +13,21 @@
  * The plugin can register a tool directly, so the daemon does not need to be an MCP server
  * for opencode's benefit. It still is one, for everything else's.
  *
- * ## The schemas are not ours
+ * ## The schemas are declared, not discovered
  *
- * The tempting version of this is to hand-write `predict`'s input schema in TypeScript. It
- * would be wrong within a release: laya went from 0.3.10 to 0.3.21 during this project and
- * changed its surface, adding `decide` and taking a different shape for `state`. So the
- * catalog is fetched from the daemon, which forwards the model's own `tools/list`, and the
- * schema opencode sees is the one the model published. There is nothing here to keep in
- * step with anything.
+ * This used to fetch the model's own `tools/list` through the daemon and hand the schema
+ * straight through, on the reasoning that laya went from 0.3.10 to 0.3.21 during this
+ * project and a hand-written copy would be wrong within a release. The reasoning was
+ * sound and the premise was not: forwarding `tools/list` reaches the process, so reading
+ * the catalog at session start paid the 20-54s model load this project exists to keep off
+ * that path. `/catalog` now serves a surface declared in config, which loads nothing, and
+ * the schema here is a pass-through.
+ *
+ * The cost is a declared list that can go stale against a release. That is preferable to
+ * the alternative and not by much of a margin: a stale name fails the call with the
+ * backend's own "unknown tool" — loud, at the moment of the call — whereas the session
+ * start that discovers tools by loading a model is quiet, costs three gigabytes, and
+ * happens whether or not the agent ever asks a question.
  */
 
 import type { Plugin } from "@opencode/plugin"
@@ -121,13 +128,27 @@ export async function callTool(
   return text
 }
 
-export async function fetchCatalog(base: string, signal?: AbortSignal): Promise<Catalog | null> {
+/**
+ * Read the daemon's declared tool surface.
+ *
+ * Inlined rather than kept as a module-level helper: one caller, and a try/catch — a
+ * pass-through with no leverage. The bound is the point. This is the only call the plugin
+ * makes at setup, and an unbounded one blocks session start forever against a daemon that
+ * accepted the connection and then stopped answering. Nothing is loaded at that point, so
+ * no model log line would say why it hung.
+ */
+async function readCatalog(base: string, timeoutMs: number): Promise<Catalog | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  timer.unref?.()
   try {
-    const res = await fetch(`${base}/catalog`, { signal })
+    const res = await fetch(`${base}/catalog`, { signal: controller.signal })
     if (!res.ok) return null
     return (await res.json()) as Catalog
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -146,8 +167,9 @@ export async function registerTools(
   },
   base: string,
   routingDefault: string | undefined,
+  catalogTimeoutMs = 10_000,
 ): Promise<{ dispose: () => Promise<void>; names: string[]; unreachable: { backend: string; error: string }[] }> {
-  const catalog = await fetchCatalog(base)
+  const catalog = await readCatalog(base, catalogTimeoutMs)
   if (!catalog) throw new Error(`could not read the tool catalog from ${base}/catalog`)
 
   const { tools, unreachable } = planTools(catalog, routingDefault)

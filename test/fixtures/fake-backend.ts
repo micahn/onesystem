@@ -36,6 +36,12 @@ export class FakeBackend implements Backend {
   readonly transport: "stdio-mcp" | "systemone-http"
   readonly toolPrefix?: string
   readonly local: boolean
+  /**
+   * The declared surface. Defaults to the fixture's own tool list so a fake used against
+   * `/catalog` agrees with what it answers `tools/list` — a fake that advertised nothing
+   * would make the catalog test pass for the wrong reason.
+   */
+  readonly tools: readonly string[]
 
   /** Everything `call` was asked, in order. */
   readonly calls: CallContext[] = []
@@ -58,6 +64,7 @@ export class FakeBackend implements Backend {
     this.#result = options.result ?? { content: [{ type: "text", text: "ok" }] }
     this.#tools = options.tools ?? []
     this.#fail = options.fail
+    this.tools = this.#tools.map((t) => t.name)
   }
 
   get state(): BackendState {
@@ -122,6 +129,7 @@ export class HangingBackend implements Backend {
   readonly name = "hanging"
   readonly transport = "stdio-mcp" as const
   readonly local = true
+  readonly tools: readonly string[] = []
   #state: BackendState = "cold"
   inflightSeen = 0
 

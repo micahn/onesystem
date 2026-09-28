@@ -12,12 +12,13 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { validate, type Config } from "../src/config.ts"
 import { runDaemon, probe } from "../src/daemon.ts"
 import type { HealthReport } from "../src/health.ts"
+import plugin from "../src/plugin/index.ts"
 
 const cleanups: (() => Promise<void>)[] = []
 const dirs: string[] = []
@@ -46,6 +47,7 @@ function testConfig(port: number, marker: string, idleShutdownSecs: number): Con
           command: [process.execPath, new URL("./fixtures/fake-mcp.ts", import.meta.url).pathname],
           env: { FAKE_MCP_MARKER: marker },
           startupTimeoutSecs: 30,
+          tools: ["decide"],
         },
       },
     },
@@ -86,6 +88,124 @@ describe("lazy start", () => {
     // The heart of it: the daemon is up and healthy, and the child has not spawned.
     expect(await markerLines(marker)).toEqual([])
     expect(health!.backends[0]!.state).toBe("cold")
+  }, 30_000)
+
+  test("the whole plugin setup path loads no model", async () => {
+    // The end-to-end version, because the bug was never in `/catalog` alone: it was that
+    // session start goes through it. Setup is `onesystem start` (a health probe) then
+    // `GET /catalog`, and the old `/catalog` forwarded `tools/list`, so every session paid
+    // a model load per enabled backend before the agent had asked anything.
+    //
+    // Driven through the real plugin against the real daemon and the real child, with the
+    // same marker file. A test that only checked the endpoint would still pass if the
+    // plugin started calling something else expensive instead.
+    const { dir, marker, port } = await workspace()
+    const config = testConfig(port, marker, 300)
+    const lockFile = join(dir, "daemon.lock")
+    const configPath = join(dir, "onesystem.json")
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        port,
+        idleShutdownSecs: 300,
+        idleSweepSecs: 1,
+        backends: {
+          fake: {
+            transport: "stdio-mcp",
+            command: [process.execPath, new URL("./fixtures/fake-mcp.ts", import.meta.url).pathname],
+            env: { FAKE_MCP_MARKER: marker },
+            tools: ["decide"],
+          },
+        },
+      }),
+    )
+
+    const daemon = await runDaemon(config, { lockFile, handleSignals: false })
+    cleanups.push(() => daemon.close())
+    const url = `http://127.0.0.1:${port}`
+    for (let i = 0; i < 200 && !(await probe(url)); i++) await Bun.sleep(50)
+
+    const registered: { name: string }[] = []
+    let hook: ((input: { tool: string }) => Promise<void>) | null = null
+    const cli = process.execPath
+    const cliArgs = [new URL("../src/cli.ts", import.meta.url).pathname]
+    type Added = { name: string }
+    type Editor = { add(t: Added): void }
+    type ToolCtx = {
+      transform: (cb: (e: Editor) => void) => Promise<{ dispose(): Promise<void> }>
+      reload: () => Promise<void>
+      hook: (n: string, cb: (input: { tool: string }) => Promise<void>) => Promise<{ dispose(): Promise<void> }>
+    }
+
+    const saved = { config: process.env.ONESYSTEM_CONFIG_DIR }
+    process.env.ONESYSTEM_CONFIG_DIR = dir
+    cleanups.push(async () => {
+      process.env.ONESYSTEM_CONFIG_DIR = saved.config
+    })
+
+    const tool: ToolCtx = {
+      transform: async (cb) => {
+        cb({ add: (t) => void registered.push(t) })
+        return { dispose: async () => {} }
+      },
+      reload: async () => {},
+      hook: async (_n, cb) => {
+        hook = cb
+        return { dispose: async () => {} }
+      },
+    }
+
+    const cleanup = await plugin.setup({
+      options: { command: cli, args: cliArgs },
+      tool,
+    } as never)
+    cleanups.push(async () => void (await cleanup?.()))
+
+    // It registered a real tool...
+    expect(registered.map((r) => r.name)).toEqual(["decide"])
+    // ...and no model was loaded to do it. This is the invariant, end to end.
+    expect(await markerLines(marker)).toEqual([])
+
+    // And the recovery hook is live, so a tool call still works afterwards.
+    expect(typeof hook).toBe("function")
+    await hook!({ tool: "decide" })
+    expect(await markerLines(marker)).toEqual([])
+  }, 40_000)
+
+  test("GET /catalog does not spawn the child", async () => {
+    // The third case, and the one that was missing. `lazy.test.ts` probed /health and never
+    // issued /catalog — the single endpoint that broke the invariant it was written to pin.
+    //
+    // The call chain was: plugin setup -> fetchCatalog -> GET /catalog -> backends.call
+    // ("tools/list") -> Supervisor.call, which cold-starts on any method. So opening a
+    // session was a Promise.all of model loads, one per enabled backend, paid before the
+    // agent had asked anything — while the plugin's own header claimed setup costs "a
+    // process spawn and a health probe". A unit test with a mocked port would have proved
+    // nothing about whether a process appeared, so this asserts against the real daemon and
+    // the same marker file the spawn test already uses.
+    const { dir, marker, port } = await workspace()
+    const config = testConfig(port, marker, 300)
+    const lockFile = join(dir, "daemon.lock")
+
+    const daemon = await runDaemon(config, { lockFile, handleSignals: false })
+    cleanups.push(() => daemon.close())
+
+    const url = `http://127.0.0.1:${port}`
+    for (let i = 0; i < 200 && !(await probe(url)); i++) await Bun.sleep(50)
+
+    const res = await fetch(`${url}/catalog`)
+    expect(res.status).toBe(200)
+
+    // It still answers usefully: a session can register tools from this.
+    const catalog = (await res.json()) as { backends: { backend: string; toolPrefix?: string; tools: { tools: { name: string }[] } }[] }
+    expect(catalog.backends).toHaveLength(1)
+    expect(catalog.backends[0]!.backend).toBe("fake")
+    // Wire names, prefix applied by the daemon, so planTools strips back to `decide`.
+    expect(catalog.backends[0]!.tools.tools.map((t) => t.name)).toEqual(["decide"])
+
+    // And the point of the whole thing: no process.
+    expect(await markerLines(marker)).toEqual([])
+    expect((await probe(url))!.backends[0]!.state).toBe("cold")
   }, 30_000)
 
   test("the first MCP request spawns the backend, and a second reuses it", async () => {
