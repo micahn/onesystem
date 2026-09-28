@@ -58,16 +58,20 @@ type Line = { text: string; tone: Tone }
  * Compact by default; the dialog adds the breakdown underneath.
  */
 export function formatUsage(b: BackendStatus): string {
-  const answered = `${b.answered} answered`
-  const bytes = b.inBytes + b.outBytes === 0 ? "0B" : `${formatBytes(b.inBytes + b.outBytes)} moved`
-  return `${b.calls} calls · ${answered} · ${bytes}`
+  return `${b.calls} calls · ${b.answered} answered · ${formatBytes(b.inBytes + b.outBytes)}`
 }
 
-/** Bytes as something a person can read at a glance. */
+/**
+ * Bytes, short.
+ *
+ * One letter for the unit, because this string is measured in sidebar columns and `KB`
+ * spends a character to say nothing the `K` does not. The dialog shows the in/out split,
+ * so the compact form never has to carry that detail itself.
+ */
 function formatBytes(n: number): string {
   if (n < 1024) return `${n}B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
-  return `${(n / 1024 / 1024).toFixed(1)}MB`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`
+  return `${(n / 1024 / 1024).toFixed(1)}M`
 }
 
 /** " (3 choice, 1 noul)", or nothing when nothing has been answered. */
@@ -328,11 +332,13 @@ export default Plugin.define({
                   : b.state === "warm"
                     ? ctx.theme.text.feedback.success.base
                     : ctx.theme.text.muted,
-              // The usage is on the same line as the state, because the question this
-              // card answers is "is it being used", and that needs both at once.
-              children: `  ${b.name} ${b.state}  ${formatUsage(b)}`,
+              children: `  ${b.name} ${b.state}`,
             }),
           )
+          // Usage on its own line, indented under the model. It was sharing a line with
+          // the state, which pushed the card past the sidebar's width and clipped the end
+          // of the number that mattered most.
+          rows.push(jsx("text", { fg: ctx.theme.text.muted, children: `    ${formatUsage(b)}` }))
         }
         if (idleLeft !== null) {
           rows.push(

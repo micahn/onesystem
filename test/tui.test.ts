@@ -140,7 +140,7 @@ describe("the detail view", () => {
       null,
     )
     expect(out).toContain("5 answered (4 choice, 1 noul)")
-    expect(out).toContain("2.0KB in / 1.4MB out")
+    expect(out).toContain("2.0K in / 1.4M out")
     expect(out).not.toMatch(/token/i)
   })
 
@@ -168,12 +168,12 @@ describe("the detail view", () => {
 
 
 describe("the usage line", () => {
-  test("shows calls, answered and volume on one line", () => {
-    // This is what the card renders, so it is the one that has to be short enough to fit a
-    // sidebar and still carry the three numbers.
+  test("shows calls, answered and volume, short enough for a sidebar", () => {
+    // Measured in columns. This string renders on its own line inside the sidebar, so
+    // every character it spends is one the model name does not get.
     expect(
       formatUsage(backend({ calls: 3, answered: 5, inBytes: 2048, outBytes: 1024 })),
-    ).toBe("3 calls · 5 answered · 3.0KB moved")
+    ).toBe("3 calls · 5 answered · 3.0K")
   })
 
   test("a model that has never been called reads as zero, not as missing", () => {
@@ -181,11 +181,10 @@ describe("the usage line", () => {
   })
 
   test("volume is in and out together, because the split is detail", () => {
-    // The dialog shows the split; the card does not have the width for it, and "moved" is
-    // the question the card is answering.
-    // 100_000 bytes is 97.7 KiB, not 100 KB -- the formatter divides by 1024 like the rest
-    // of the tool does, and the test should say so rather than round in its favour.
+    // In and out are summed: the card has the width for one number and the dialog already
+    // shows the split. 100_000 bytes is 97.7 KiB, not 100 KB -- the formatter divides by
+    // 1024, and the test should say so rather than round in its favour.
     const out = formatUsage(backend({ inBytes: 10_000, outBytes: 90_000 }))
-    expect(out).toContain("97.7KB moved")
+    expect(out).toContain("97.7K")
   })
 })
