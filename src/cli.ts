@@ -7,8 +7,7 @@
 import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join } from "node:path"
 import { loadConfig, type Config } from "./config.ts"
 import { configCandidates, configDir, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
@@ -16,13 +15,7 @@ import type { DaemonStatus } from "./health.ts"
 import { inspect } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
-import {
-  opencodeConfigPath,
-  pluginAutoloadFile,
-  switchToBackend,
-  unregisterPlugin,
-  writeBackend,
-} from "./config-edit.ts"
+import { pluginAutoloadFiles, switchToBackend, writeBackend } from "./config-edit.ts"
 import { findModel, MODELS } from "./models.ts"
 import {
   backendFor,
@@ -312,45 +305,34 @@ async function cmdUse(args: string[]): Promise<number> {
  * duplicate loading. JSONC edits preserve unrelated config and comments.
  */
 async function cmdRegisterPlugin(): Promise<number> {
-  const file = pluginAutoloadFile()
+  const { dir, files } = pluginAutoloadFiles()
+  let wrote = 0
   try {
-    await mkdir(dirname(file.path), { recursive: true })
-    // Refresh moved checkout paths; report a change only when the content differs.
-    const same = (await readFile(file.path, "utf8").catch(() => "")) === file.contents
-    await writeFile(file.path, file.contents)
-    process.stdout.write(`${same ? "already registered" : "registered"}: ${file.path}\n`)
+    await mkdir(dir, { recursive: true })
+    for (const f of files) {
+      // Rewritten every run so a moved checkout self-heals, but only reported as a change
+      // when the bytes differ, so a re-run says "already" instead of touching a watcher.
+      if ((await readFile(f.path, "utf8").catch(() => "")) !== f.contents) wrote++
+      await writeFile(f.path, f.contents)
+    }
   } catch (err) {
-    process.stderr.write(`could not write ${file.path}: ${describeError(err)}\n`)
+    process.stderr.write(`could not write ${dir}: ${describeError(err)}\n`)
     return 1
   }
 
-  const path = opencodeConfigPath()
-  let before: string
-  try {
-    before = await readFile(path, "utf8")
-  } catch {
-    return 0 // no config to clean up
-  }
-  try {
-    const entry = fileURLToPath(new URL("../src/plugin", import.meta.url))
-    const result = unregisterPlugin(before, entry)
-    if (result.removed === 0) return 0
+  process.stdout.write(`${wrote === 0 ? "already registered" : "registered"}: ${dir}\n`)
+  process.stdout.write(`  ${files.map((f) => f.path.slice(dir.length + 1)).join(", ")}\n`)
 
-    // Detect edits made since our first read.
-    if ((await readFile(path, "utf8").catch(() => "")) !== before) {
-      process.stderr.write(`${path} changed while this was running; not writing over it. Re-run.\n`)
-      return 1
-    }
-    await writeFile(path, result.text)
-    process.stdout.write(
-      `removed ${result.removed} stale "plugins" entry from ${path}; autodetection covers it now\n`,
-    )
-  } catch (err) {
-    // Registration succeeded, but the remaining entry can cause duplicate loading.
-    process.stderr.write(`note: could not clean ${path}: ${describeError(err)}\n`)
-  }
+  // `opencode.json` is the user's file and is deliberately not read or written here. An
+  // installer that edits a config it does not own goes wrong on somebody else's machine,
+  // and this registration needs no config at all.
+  //
+  // `opencode plugin list` reports the server entrypoint only, so it cannot confirm the
+  // TUI half. The footer is the check for that.
+  process.stdout.write("  restart OpenCode, then check the footer\n")
   return 0
 }
+
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const { command } = parseArgs(argv)

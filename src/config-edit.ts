@@ -5,7 +5,7 @@
 
 import { readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 import type { Config } from "./config.ts"
@@ -90,54 +90,42 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Remove this checkout's plugins-array entry after registering its autoload file.
- * Preserve other settings and return the number removed.
+ * The files that register this plugin with OpenCode: a directory under
+ * `~/.config/opencode/plugins/` holding one entrypoint per half.
+ *
+ * A directory, not a file, because the plugin has two entrypoints and OpenCode finds the
+ * second by name beside the first. `index.ts` is the server plugin, `tui.ts` is the status
+ * line and install menu, and a TUI entrypoint is only loaded when it sits next to the server
+ * one. A single `onesystem.ts` re-export loads the server half and silently drops the TUI
+ * half, which looks like a working install with a missing footer.
+ *
+ * Both are re-exports of the checkout rather than copies. Autodetection does not follow a
+ * symlink, and a copy is worse than unavailable: the plugin imports `../health.ts` and
+ * friends and resolves its own CLI at `../cli.ts`, so a copy of `src/plugin/` alone does not
+ * run, and a copy of the whole tree is a second, silently stale copy of the code the plugin
+ * executes. A re-export always reads the checkout, so `git pull` takes effect on reload.
+ *
+ * Nothing here reads or writes `opencode.json`. An installer that edits a config it does not
+ * own is a thing that goes wrong on somebody else's machine.
  */
-export function unregisterPlugin(
-  text: string,
-  pluginPath: string,
-): { text: string; removed: number } {
-  const errors: ParseError[] = []
-  const doc = parse(text, errors) as Record<string, unknown> | undefined
-  if (errors.length > 0) {
-    const first = errors[0]!
-    throw new Error(`not valid JSONC at offset ${first.offset}: ${printParseErrorCode(first.error)}`)
-  }
-  // Leave an unexpected plugins value unchanged.
-  if (doc === undefined || !Array.isArray(doc.plugins)) return { text, removed: 0 }
-
-  const list = doc.plugins as unknown[]
-  const target = resolve(pluginPath)
-  const keep = list.filter(
-    (e) => !(isPlainObject(e) && typeof e.package === "string" && resolve(e.package) === target),
-  )
-  if (keep.length === list.length) return { text, removed: 0 }
-
+export function pluginAutoloadFiles(): {
+  dir: string
+  files: { path: string; contents: string }[]
+} {
+  // OPENCODE_CONFIG_DIR is the config directory, not the plugins directory: a plugin
+  // discovered from it sits at `<config-dir>/plugins/onesystem/`. Verified by pointing
+  // opencode at a sandbox with a plugin under its `plugins/`, which it found.
+  const base = process.env.OPENCODE_CONFIG_DIR ?? join(homedir(), ".config", "opencode")
+  const dir = join(base, "plugins", "onesystem")
+  const from = (name: string) => fileURLToPath(new URL(`../src/plugin/${name}.ts`, import.meta.url))
+  const reexport = (name: string) => `export { default } from ${JSON.stringify(from(name))}\n`
   return {
-    text: applyEdits(
-      text,
-      modify(text, ["plugins"], keep, { formattingOptions: { insertSpaces: true, tabSize: 2 } }),
-    ),
-    removed: list.length - keep.length,
+    dir,
+    files: [
+      { path: join(dir, "index.ts"), contents: reexport("index") },
+      { path: join(dir, "tui.ts"), contents: reexport("tui") },
+    ],
   }
-}
-
-/**
- * Generate a one-line re-export in OpenCode's plugins directory. This preserves
- * relative imports and uses checkout updates on reload. Autodetection skips symlinks.
- */
-export function pluginAutoloadFile(): { path: string; contents: string } {
-  const dir = join(
-    process.env.OPENCODE_CONFIG_DIR ?? join(homedir(), ".config", "opencode"),
-    "plugins",
-  )
-  const entry = fileURLToPath(new URL("../src/plugin/index.ts", import.meta.url))
-  return { path: join(dir, "onesystem.ts"), contents: `export { default } from ${JSON.stringify(entry)}\n` }
-}
-
-/** Where opencode keeps its config. `OPENCODE_CONFIG` overrides, for a test or a second home. */
-export function opencodeConfigPath(): string {
-  return process.env.OPENCODE_CONFIG ?? join(homedir(), ".config", "opencode", "opencode.json")
 }
 
 /**

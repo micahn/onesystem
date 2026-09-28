@@ -17,8 +17,9 @@ The installer clones to `~/.local/share/onesystem/repo`, installs laya, writes t
 config, and registers the plugin. You can run it again to update the checkout;
 it skips installed runtimes and asks before running `sudo`.
 
-Restart OpenCode, then run `opencode plugin list` to check that `onesystem` loaded.
-The first tool call loads the model. Warm calls take tens of milliseconds.
+Restart OpenCode, then run `opencode plugin list` to check that `onesystem` loaded, and
+look for the status line to confirm the TUI half. The first tool call loads the model. Warm
+calls take tens of milliseconds.
 
 [Manual install](#manual-install) · [Julia or a custom path](#installer-options) ·
 [Existing laya setup](#existing-laya-setup)
@@ -48,7 +49,7 @@ package's CLI to `PATH`, you can use `onesystem <command>` instead.
 | `use <model>` | Enable one configured backend and disable the others. |
 | `uninstall <model>` | Remove its runtime. Keep downloaded weights. |
 | `config-path` | Show the config path. |
-| `register-plugin` | Register this checkout with OpenCode. |
+| `register-plugin` | Write this checkout into OpenCode's plugins directory. |
 
 Installing or selecting a model disables the other backends. After a config change,
 stop the daemon and restart OpenCode to reload the config and tool names.
@@ -163,12 +164,32 @@ Use `install julia` for julia. Add `--no-config` to print the config block inste
 of writing it, or `--lock-only` to resolve dependencies without installing the runtime.
 Backends should show `cold` until the first call.
 
-Registration writes `~/.config/opencode/plugins/onesystem.ts`, which re-exports the
-plugin from this checkout. Keep the checkout at that path. Updates take effect when
-OpenCode reloads the plugin. Registration also removes the old `plugins` array entry
-from `opencode.json` to prevent duplicate loading.
+Registration writes `~/.config/opencode/plugins/onesystem/`, one file per entrypoint,
+each re-exporting this checkout:
 
-Restart OpenCode and check `opencode plugin list`.
+```ts
+// index.ts — server plugin: the laya_* tools
+export { default } from "/absolute/path/to/onesystem/src/plugin/index.ts"
+
+// tui.ts — status line and install menu
+export { default } from "/absolute/path/to/onesystem/src/plugin/tui.ts"
+```
+
+OpenCode discovers that directory on its own. `opencode.json` is not read or written.
+
+A directory rather than a single file because the plugin has two entrypoints and OpenCode
+finds the TUI one only when it sits beside the server one. A lone `onesystem.ts` loads the
+server half and silently drops the TUI half, which looks like a working install with no
+footer.
+
+Re-exports rather than copies, because autodetection skips symlinks and a copy of
+`src/plugin/` cannot resolve its own imports or find its CLI at `../cli.ts`. A copy of the
+whole tree does resolve, and is worse: a second copy of the code the plugin runs, stale after
+`git pull`. Keep the checkout at the path above. Updates take effect when OpenCode reloads
+the plugin.
+
+Restart OpenCode, then run `opencode plugin list` for the server half and look for the status
+line for the TUI half. The list does not report TUI plugins.
 
 ### Existing laya setup
 

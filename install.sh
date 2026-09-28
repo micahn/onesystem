@@ -242,11 +242,12 @@ fi
 
 stage "opencode plugin"
 
-# Register a re-export so checkout updates take effect on plugin reload.
+# Writes ~/.config/opencode/plugins/onesystem/{index,tui}.ts, each a one-line re-export of
+# the checkout. opencode discovers the directory itself, so opencode.json is not touched.
 if bun run src/cli.ts register-plugin; then
   DONE+=("plugin registered in opencode's plugins directory")
 else
-  SKIPPED+=("add the plugin by hand: create ~/.config/opencode/plugins/onesystem.ts")
+  SKIPPED+=("add the plugin by hand: create ~/.config/opencode/plugins/onesystem/ with index.ts and tui.ts")
 fi
 
 stage "Verify"
@@ -277,6 +278,6 @@ cat <<EOF
   The first tool call loads the model (~10-15s). Warm calls take tens of milliseconds.
 
   ${DIM}To uninstall: $UNINSTALL
-  and delete ~/.config/opencode/plugins/onesystem.ts.${RESET}
+  and delete ~/.config/opencode/plugins/onesystem/.${RESET}
 
 EOF

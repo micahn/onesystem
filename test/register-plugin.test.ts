@@ -1,146 +1,149 @@
 /**
- * Registration must re-export the checkout from OpenCode's plugins directory.
- * A source copy would break relative imports or become stale after updates.
+ * Registering the plugin with OpenCode, which autodiscovers it from a directory.
+ *
+ * Two things are pinned here. That the registration is a directory with one entrypoint per
+ * half, because a TUI entrypoint is only found beside the server one. And that nothing reads
+ * or writes `opencode.json`: an installer that edits a config it does not own goes wrong on
+ * somebody else's machine, and this registration needs no config at all.
  */
 
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { unregisterPlugin, pluginAutoloadFile } from "../src/config-edit.ts"
-
-const DIR = "/home/you/onesystem/src/plugin"
+import { pluginAutoloadFiles } from "../src/config-edit.ts"
 
 const parse = (t: string) => JSON.parse(t.replace(/^\s*\/\/.*$/gm, "")) as Record<string, any>
 
-describe("the autodetect file", () => {
-  test("it is a one-line re-export of the plugin entry", () => {
-    const { contents } = pluginAutoloadFile()
-    // The path is this checkout's, resolved from the module rather than configured, so it is
-    // asserted by shape and then checked against the real file further down. Hardcoding a
-    // path here is what made an earlier version of this test fail on its own fixture.
-    expect(contents.trim()).toMatch(/^export \{ default \} from ".*src\/plugin\/index\.ts"$/)
+describe("the autoload files", () => {
+  test("it writes a directory, with one entrypoint per half", async () => {
+    const { dir, files } = pluginAutoloadFiles()
+    expect(dir.endsWith(join("plugins", "onesystem"))).toBe(true)
+    // Both halves, and they are siblings. A single `onesystem.ts` loads the server plugin
+    // and silently drops the TUI one, which looks like a working install with no footer.
+    expect(files.map((f) => f.path.slice(dir.length + 1)).sort()).toEqual(["index.ts", "tui.ts"])
   })
 
-  test("it lands in the plugins directory opencode watches", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "onesystem-oc-"))
-    const { path, contents } = pluginAutoloadFile()
-    // Redirected rather than read from the real home: this asserts the layout without
-    // writing into somebody's opencode config.
-    expect(path.endsWith(join("plugins", "onesystem.ts"))).toBe(true)
-    // The entry is a `.ts` inside the plugins dir, which is one of the two forms opencode
-    // autodiscovers. A directory would need an index file of its own and would be a copy.
-    expect(contents).toContain(".ts")
-    expect(dir).toBeTruthy()
+  test("each one re-exports the matching checkout entrypoint", () => {
+    const { files } = pluginAutoloadFiles()
+    // Matched by suffix rather than a built regex: `tui.ts` has to point at `tui.ts`, and
+    // pairing the wrong halves would load a TUI that renders the server's state.
+    for (const f of files) {
+      const name = f.path.slice(f.path.lastIndexOf("/") + 1)
+      expect(f.contents.trim().endsWith(`/src/plugin/${name}"`)).toBe(true)
+    }
   })
 
   test("a copy is not an option, and here is why", async () => {
-    // Written as a test because the reason is invisible in the finished file. The plugin
-    // imports modules from the directory above it and derives its own CLI path from
-    // `../cli.ts`, so a copy of `src/plugin/` alone does not resolve. A copy of the whole
-    // tree resolves and is worse: it is a second copy of the code the plugin runs, which
-    // goes stale on `git pull` and nobody notices until the two disagree.
-    const plugin = await readFile(join(import.meta.dir, "..", "src", "plugin", "discover.ts"), "utf8")
-    expect(plugin).toContain('new URL("../cli.ts", import.meta.url)')
+    // Written as a test because the reason is invisible in the finished files. The plugin
+    // imports modules from the directory above it and resolves its own CLI at `../cli.ts`,
+    // so a copy of `src/plugin/` alone does not run. A copy of the whole tree does, and is
+    // worse: a second copy of the code the plugin executes, which goes stale on `git pull`
+    // and nobody notices until the two disagree.
+    const discover = await readFile(join(import.meta.dir, "..", "src", "plugin", "discover.ts"), "utf8")
+    expect(discover).toContain('new URL("../cli.ts", import.meta.url)')
     const index = await readFile(join(import.meta.dir, "..", "src", "plugin", "index.ts"), "utf8")
     expect(index).toMatch(/from "\.\.\//)
   })
-})
 
-describe("removing the old config entry", () => {
-  /** Shaped like the real thing: comments, and keys an installer has no business touching. */
-  const SAMPLE = `{
-  // the agent config
-  "model": "anthropic/claude-sonnet-4",
-  "plugins": [
-    { "package": "${DIR}" },
-    { "package": "/other/plugin" }
-  ],
-  "permission": {
-    // allow the boring ones
-    "edit": "allow"
-  }
-}
-`
-
-  test("it removes only this repo's entry, and says how many", () => {
-    const { text, removed } = unregisterPlugin(SAMPLE, DIR)
-    expect(removed).toBe(1)
-    expect(parse(text).plugins).toEqual([{ package: "/other/plugin" }])
-  })
-
-  test("comments and unrelated keys survive", () => {
-    // The reason this is code and not `sed`. A `JSON.parse`/`stringify` round trip is
-    // shorter by a few lines and destroys every comment in the file.
-    const { text } = unregisterPlugin(SAMPLE, DIR)
-    expect(text).toContain("// the agent config")
-    expect(text).toContain("// allow the boring ones")
-    const before = parse(SAMPLE)
-    const after = parse(text)
-    for (const key of Object.keys(before)) {
-      if (key === "plugins") continue
-      expect(`${key}: ${JSON.stringify(after[key])}`).toBe(`${key}: ${JSON.stringify(before[key])}`)
+  test("both entrypoints resolve to the real plugin objects", async () => {
+    // The point of the exercise: a re-export that resolves to a module with no hooks in it
+    // is a plugin that loads and does nothing.
+    const { files } = pluginAutoloadFiles()
+    for (const f of files) {
+      const mod = await import(f.contents.match(/from "(.*)"/)![1]!)
+      expect(`${f.path}: ${typeof mod.default}`).toBe(`${f.path}: object`)
+      expect(`${f.path}: ${typeof mod.default.setup}`).toBe(`${f.path}: function`)
     }
   })
 
-  test("it recognises a path written with a trailing slash or a dot segment", () => {
-    // Compared resolved, because `package` is a directory and a person may have written it
-    // either way. Byte comparison would miss it and leave the plugin registered twice.
-    for (const variant of [`${DIR}/`, `${DIR}/.`, `${DIR}/./`]) {
-      const { removed } = unregisterPlugin(SAMPLE.replace(DIR, variant), DIR)
-      expect(`${variant}: ${removed}`).toBe(`${variant}: 1`)
-    }
-  })
-
-  test("a config that does not list this plugin is left byte-identical", () => {
-    // So a re-run reports "already correct" instead of rewriting the file for nothing.
-    for (const sample of [
-      `{\n  "plugins": [{ "package": "/other/plugin" }]\n}\n`,
-      `{\n  "plugins": []\n}\n`,
-      `{\n  "model": "x"\n}\n`,
-    ]) {
-      const { text, removed } = unregisterPlugin(sample, DIR)
-      expect(`${removed}: ${text === sample}`).toBe("0: true")
-    }
-  })
-
-  test("a plugins value that is not an array is left alone", () => {
-    // Somebody's deliberate shape. Guessing at it is how an install eats a config, and
-    // leaving it is safe: the autodetect file already registered the plugin.
-    const odd = `{\n  // mine\n  "plugins": { "package": "${DIR}" }\n}\n`
-    const { text, removed } = unregisterPlugin(odd, DIR)
-    expect(removed).toBe(0)
-    expect(text).toBe(odd)
-  })
-
-  test("a file that is not JSONC is refused, and says where", () => {
-    expect(() => unregisterPlugin('{ "plugins": [ }', DIR)).toThrow(/not valid JSONC at offset/)
+  test("a repeated run produces byte-identical files", () => {
+    // So re-running the installer does not make OpenCode's watcher reload the plugin for
+    // no reason.
+    const a = pluginAutoloadFiles().files.map((f) => f.contents)
+    const b = pluginAutoloadFiles().files.map((f) => f.contents)
+    expect(b).toEqual(a)
   })
 })
 
-describe("what the command writes, end to end", () => {
-  test("a repeated run is byte-identical, so re-running changes nothing", async () => {
-    // The installer is meant to be safe to re-run, and a file whose contents are rewritten
-    // with a fresh timestamp every time would make opencode's watcher reload the plugin on
-    // every install for no reason.
-    const first = pluginAutoloadFile().contents
-    const second = pluginAutoloadFile().contents
-    expect(second).toBe(first)
+describe("the user's OpenCode config", () => {
+  test("registration never reads or writes opencode.json", async () => {
+    // The strongest form of the claim. `pluginAutoloadFiles` resolves its own target from
+    // the environment and the module's own location, so a caller cannot be handed a config
+    // path to edit, and no exported function takes one.
+    const source = await readFile(join(import.meta.dir, "..", "src", "config-edit.ts"), "utf8")
+    const exported = [...source.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]!)
+    // `opencodeConfigPath` was the only way to reach the file, and it is gone.
+    expect(exported).not.toContain("opencodeConfigPath")
+    expect(source).not.toContain("unregisterPlugin")
 
-    // And the plugin it points at has to be the default export, or opencode loads a module
-    // with no hooks in it and the session silently has no tools.
-    const entry = first.match(/from "(.*)"/)![1]!
-    const mod = await import(entry)
-    expect(typeof mod.default).toBe("object")
-    expect(typeof mod.default.setup).toBe("function")
+    const cli = await readFile(join(import.meta.dir, "..", "src", "cli.ts"), "utf8")
+    // Comments are stripped before the check, because the command carries a comment naming
+    // `opencode.json` to explain why it does not go near it. Matching on raw text failed on
+    // that comment, which is the note working, not the guard failing.
+    const body = cli
+      .slice(cli.indexOf("async function cmdRegisterPlugin"))
+      .slice(0, cli.slice(cli.indexOf("async function cmdRegisterPlugin")).indexOf("\n}\n"))
+      .replace(/\/\/[^\n]*/g, "")
+    expect(body).not.toContain("opencode.json")
+    // And every write it performs targets a path the autoload files own.
+    expect([...body.matchAll(/writeFile\(([^,]+),/g)].map((m) => m[1]!.trim())).toEqual(["f.path"])
   })
 
-  test("the real entry file is what the generated line points at", async () => {
-    const { contents } = pluginAutoloadFile()
-    const entry = contents.match(/from "(.*)"/)![1]!
-    const here = join(import.meta.dir, "..")
-    // Resolves to this checkout, not to an installer's copy of it.
-    expect(entry.startsWith(here)).toBe(true)
-    await expect(readFile(entry, "utf8")).resolves.toContain("Plugin.define")
+  test("the directory lands where OpenCode watches, and a config file is irrelevant", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "onesystem-oc-"))
+    const previous = process.env.OPENCODE_CONFIG_DIR
+    process.env.OPENCODE_CONFIG_DIR = dir
+    try {
+      const { dir: target, files } = pluginAutoloadFiles()
+      // `OPENCODE_CONFIG_DIR` is the config directory, and a discovered plugin lives at
+      // `<config-dir>/plugins/onesystem/`. Writing to `<config-dir>/onesystem/` instead
+      // puts the files somewhere opencode does not look, which is a silent no-op install.
+      expect(target).toBe(join(dir, "plugins", "onesystem"))
+      // Nothing else is consulted: no config, no registry, no network.
+      expect(files.every((f) => f.contents.startsWith("export { default } from"))).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+      else process.env.OPENCODE_CONFIG_DIR = previous
+    }
+  })
+
+  test("the default location is the OpenCode plugins directory", () => {
+    const previous = process.env.OPENCODE_CONFIG_DIR
+    delete process.env.OPENCODE_CONFIG_DIR
+    try {
+      // Not `~/.local/share`, which is where onesystem's own runtimes live and where a
+      // plugin placed there is not discovered at all.
+      const { dir } = pluginAutoloadFiles()
+      expect(dir).toMatch(/\/\.config\/opencode\/plugins\/onesystem$/)
+      expect(dir).not.toContain(".local/share")
+    } finally {
+      if (previous !== undefined) process.env.OPENCODE_CONFIG_DIR = previous
+    }
+  })
+
+  test("a plugins array someone else owns is not ours to touch", async () => {
+    // The scenario the old code got wrong: a user with their own `plugins` array. Writing to
+    // it to remove our own entry is a correct-looking edit to a file we do not own.
+    const mine = `{\n  // my plugins\n  "plugins": [{ "package": "some-other-plugin" }]\n}\n`
+    const ocDir = await mkdtemp(join(tmpdir(), "onesystem-oc-"))
+    const config = join(ocDir, "opencode.json")
+    await writeFile(config, mine)
+
+    // The config file sits beside the plugins directory, which is where a user's own
+    // `plugins` array would be. Registration writes only under `plugins/` and leaves it.
+    const previous = process.env.OPENCODE_CONFIG_DIR
+    process.env.OPENCODE_CONFIG_DIR = ocDir
+    try {
+      const { dir, files } = pluginAutoloadFiles()
+      await mkdir(dir, { recursive: true })
+      for (const f of files) await writeFile(f.path, f.contents)
+      expect((await readdir(dir)).sort()).toEqual(["index.ts", "tui.ts"])
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+      else process.env.OPENCODE_CONFIG_DIR = previous
+    }
+
+    expect(await readFile(config, "utf8")).toBe(mine)
   })
 })
