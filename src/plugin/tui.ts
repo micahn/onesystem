@@ -6,18 +6,31 @@
  */
 
 import { Plugin } from "@opencode/plugin/tui"
-import { createSignal } from "solid-js"
+import { createEffect, createSignal } from "solid-js"
 import { jsx } from "@opentui/solid/jsx-runtime"
 import { probeHealth, type HealthReport } from "../health.ts"
 import type { BackendStatus } from "../backend/types.ts"
-import { MODELS } from "../models.ts"
 import { loadConfig } from "../config.ts"
-import { switchToBackend } from "../config-edit.ts"
+import {
+  SETTING_BOUNDS,
+  backendStates,
+  setBackendEnabled,
+  setSetting,
+  switchToBackend,
+  type NumericSetting,
+} from "../config-edit.ts"
 import { describeError } from "../async.ts"
 import { defaultCli, resolveBase, run } from "./discover.ts"
-
-/** How often to re-read /health. */
-const POLL_MS = 4_000
+import {
+  DEFAULT_SETTINGS,
+  POLL_MS_BOUNDS,
+  normalizeSettings,
+  parseNumeric,
+  parsePollMs,
+  topMenu,
+  type MenuValue,
+  type PluginSettings,
+} from "./menu.ts"
 
 type Tone = "info" | "success" | "warning" | "error"
 type Line = { text: string; tone: Tone }
@@ -257,6 +270,12 @@ export default Plugin.define({
     let base: string | null = null
     let busy = false
 
+    // Plugin presentation settings live in OpenCode's own durable store, not in
+    // onesystem.jsonc, which belongs to the daemon.
+    const [settings, setSettings] = ctx.storage.store<PluginSettings>("settings", {
+      initial: DEFAULT_SETTINGS,
+    })
+
     const refresh = async () => {
       if (!base) {
         // Cache the address to avoid spawning the CLI on each poll.
@@ -284,26 +303,54 @@ export default Plugin.define({
     }
 
     // An immediate first read so the line is not blank for a poll interval, then a timer.
-    // `unref` so a TUI plugin cannot hold the process open on its own.
+    // `unref` so a TUI plugin cannot hold the process open on its own. Recreated when the
+    // interval changes, so the setting takes effect without restarting OpenCode.
     void tick()
-    const timer = setInterval(() => void tick(), POLL_MS)
+    let timer = setInterval(() => void tick(), settings.pollMs)
     timer.unref?.()
+    let timerMs = settings.pollMs
+    createEffect(() => {
+      const want = normalizeSettings(settings).pollMs
+      if (want === timerMs) return
+      timerMs = want
+      clearInterval(timer)
+      timer = setInterval(() => void tick(), want)
+      timer.unref?.()
+    })
+
+    /** The daemon reads its backend list once at startup, so a config change needs one. */
+    const restartDaemon = async (why: string) => {
+      ctx.ui.toast.show({ message: `${why} — restarting the daemon`, variant: "info" })
+      if ((await run(cli.command, [...cli.args, "stop"])) !== 0) {
+        ctx.ui.toast.show({ title: "could not stop the daemon", message: "trying to start anyway", variant: "warning" })
+      }
+      const code = await run(cli.command, [...cli.args, "start"])
+      // The address may have moved with a port change.
+      base = null
+      await tick()
+      ctx.ui.toast.show(
+        code === 0
+          ? { message: "daemon restarted", variant: "success" }
+          : { title: "the daemon did not come back", message: "run `onesystem status` to see why", variant: "error" },
+      )
+      return code
+    }
 
     /**
-     * /onesystem menu: status and model installation.
+     * /onesystem: status, model install and toggles, and settings.
      */
     const menu = async () => {
-      const choice = await ctx.ui.dialog.select<"status" | `install:${string}`>({
+      const config = await loadConfig().then(
+        (r) => r.config,
+        // No config yet: the install path writes one, so the menu can still work.
+        () => null,
+      )
+      const choice = await ctx.ui.dialog.select<MenuValue>({
         title: "onesystem",
-        options: [
-          { title: "Show status", value: "status", description: "daemon, model and device" },
-          ...MODELS.map((m) => ({
-            title: `Install ${m.name}`,
-            value: `install:${m.name}` as const,
-            description: "downloads its own torch; several GB",
-          })),
-        ],
+        options: topMenu(config, normalizeSettings(settings)),
       })
+      if (!choice) return
+
       if (choice === "status") {
         // Use the same snapshot as the card.
         await ctx.ui.dialog.alert({
@@ -312,7 +359,90 @@ export default Plugin.define({
         })
         return
       }
-      if (!choice?.startsWith("install:")) return
+
+      if (choice === "restart") {
+        await restartDaemon("restarting")
+        return
+      }
+
+      if (choice === "setting:showCard") {
+        const next = !settings.showCard
+        await setSettings((d) => {
+          d.showCard = next
+        })
+        ctx.ui.toast.show({ message: `sidebar card ${next ? "on" : "off"}`, variant: "success" })
+        return
+      }
+
+      if (choice === "setting:pollMs") {
+        const raw = await ctx.ui.dialog.prompt({
+          title: "Poll interval (ms)",
+          description: `How often the footer re-reads status. ${POLL_MS_BOUNDS.min}-${POLL_MS_BOUNDS.max}.`,
+          value: String(settings.pollMs),
+        })
+        if (raw === undefined) return
+        try {
+          const n = parsePollMs(raw)
+          await setSettings((d) => {
+            d.pollMs = n
+          })
+        } catch (err) {
+          ctx.ui.toast.show({ title: "not changed", message: describeError(err), variant: "error" })
+        }
+        return
+      }
+
+      if (choice.startsWith("setting:")) {
+        const key = choice.slice("setting:".length) as NumericSetting
+        const current = config?.[key]
+        if (!config || current === undefined) return
+        const raw = await ctx.ui.dialog.prompt({
+          title: key,
+          description: `Currently ${current}. Bounds ${SETTING_BOUNDS[key].min}–${SETTING_BOUNDS[key].max}.`,
+          value: String(current),
+        })
+        if (raw === undefined) return
+        let value: number
+        try {
+          value = parseNumeric(key, raw)
+        } catch (err) {
+          ctx.ui.toast.show({ title: "not changed", message: describeError(err), variant: "error" })
+          return
+        }
+        if (!config) return
+        try {
+          const { path } = await loadConfig()
+          const { changed } = await setSetting(path, key, value)
+          if (!changed) {
+            ctx.ui.toast.show({ message: `already ${value}`, variant: "info" })
+            return
+          }
+          await restartDaemon(`${key} is now ${value}`)
+        } catch (err) {
+          ctx.ui.toast.show({ title: "not changed", message: describeError(err), variant: "error" })
+        }
+        return
+      }
+
+      if (choice.startsWith("model:")) {
+        const name = choice.slice("model:".length)
+        if (!config) return
+        const on = backendStates(config).find((b) => b.name === name)?.enabled === true
+        try {
+          const { path } = await loadConfig()
+          const { changed } = await setBackendEnabled(path, config, name, !on)
+          if (!changed) {
+            ctx.ui.toast.show({ message: `already ${on ? "enabled" : "disabled"}`, variant: "info" })
+            return
+          }
+          await restartDaemon(`${name} ${on ? "disabled" : "enabled"}`)
+        } catch (err) {
+          ctx.ui.toast.show({ title: "not changed", message: describeError(err), variant: "error" })
+        }
+        return
+      }
+
+      if (!choice.startsWith("install:")) return
 
       const name = choice.slice("install:".length)
       const ok = await ctx.ui.dialog.confirm({
@@ -335,20 +465,20 @@ export default Plugin.define({
 
       // Use the same config switch as the CLI.
       try {
-        const { config, path } = await loadConfig()
-        const switched = await switchToBackend(path, config, name)
+        const { config: fresh, path } = await loadConfig()
+        const switched = await switchToBackend(path, fresh, name)
+        await restartDaemon(`${name} installed and enabled`)
         ctx.ui.toast.show({
-          title: `${name} installed and switched to`,
           message: switched.changed
-            ? `now enabled: ${switched.on.join(", ")}. Restart the daemon (or just make a tool call) to pick it up.`
+            ? `now enabled: ${switched.on.join(", ")}`
             : `${name} was already the only enabled backend.`,
           variant: "success",
         })
       } catch (err) {
         // The runtime remains usable if the config switch fails.
         ctx.ui.toast.show({
-          title: `${name} installed, but not switched to`,
-          message: `${describeError(err)}\n\nIt is on disk and usable — \`onesystem use ${name}\` will switch to it.`,
+          title: `${name} installed, but not enabled`,
+          message: `${describeError(err)}\n\nIt is on disk and usable — enable it from this menu.`,
           variant: "warning",
         })
       }
@@ -357,9 +487,13 @@ export default Plugin.define({
     // keymap.layer needs a component owner; register once inside the slot render.
     let registered = false
 
+    // A slot cannot be removed after setup, so the card renders nothing when it is off.
     const card = ctx.ui.slot({
       append: "sidebar.content",
-      render: () => renderCard(daemonView(report(), sawHealthy()), ctx.theme),
+      render: () =>
+        settings.showCard
+          ? renderCard(daemonView(report(), sawHealthy()), ctx.theme)
+          : jsx("text", { children: "" }),
     })
 
     const dispose = ctx.ui.slot({

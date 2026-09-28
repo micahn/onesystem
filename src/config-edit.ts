@@ -38,6 +38,41 @@ export function backendStates(config: Config): { name: string; enabled: boolean 
   return Object.entries(config.backends).map(([name, spec]) => ({ name, enabled: spec.enabled !== false }))
 }
 
+/** The top-level numbers the TUI can edit, with the range each one accepts. */
+export type NumericSetting = "port" | "idleShutdownSecs"
+
+export const SETTING_BOUNDS: Record<NumericSetting, { min: number; max: number }> = {
+  port: { min: 1, max: 65535 },
+  // 0 would disable the idle sweep and pin the GPU on forever, so it is not offered.
+  idleShutdownSecs: { min: 10, max: 86_400 },
+}
+
+/** Turn one backend on or off without touching the others. */
+export async function setBackendEnabled(
+  path: string,
+  config: Config,
+  name: string,
+  enabled: boolean,
+): Promise<{ changed: boolean }> {
+  if (!backendStates(config).some((s) => s.name === name)) {
+    throw new Error(`no backend named "${name}" in ${path}; found: ${backendStates(config).map((s) => s.name).join(", ") || "none"}`)
+  }
+  const result = await editConfig(path, (text) => setEnabled(text, name, enabled))
+  return { changed: result.changed }
+}
+
+/** Write one top-level number. The value is bounds-checked by the caller. */
+export async function setSetting(
+  path: string,
+  key: NumericSetting,
+  value: number,
+): Promise<{ changed: boolean }> {
+  const result = await editConfig(path, (text) =>
+    applyEdits(text, modify(text, [key], value, { formattingOptions: { insertSpaces: true, tabSize: 2 } })),
+  )
+  return { changed: result.changed }
+}
+
 /**
  * Enable one backend and disable the others. Shared by the CLI and TUI.
  * Throw with the available names if the requested backend is missing.

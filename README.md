@@ -67,6 +67,26 @@ stop the daemon and restart OpenCode to reload the config and tool names.
 
 Logs: `~/.local/state/onesystem/daemon.log`.
 
+### From inside OpenCode
+
+`/onesystem` opens a menu, and is also in the command palette. One flat list, grouped:
+
+| | |
+| --- | --- |
+| Show status | The same snapshot the sidebar card renders. |
+| Restart daemon | Reloads models. Drops warm ones, so the next call pays the load. |
+| Enable / Disable `<model>` | Per model, independently. Restarts the daemon after. |
+| Install `<model>` | Confirms first, since it is a several-GB download. |
+| Daemon port, Idle window | Written to the config. Restarts the daemon after. |
+| Poll interval, Sidebar card | OpenCode plugin state, applied without a restart. |
+
+The daemon reads its backend list once at startup, so a toggle or a port change has no
+effect until it restarts. The menu restarts it for you, which unloads whatever is warm.
+
+Plugin settings live in OpenCode's own store rather than `onesystem.jsonc`, because they
+are not the daemon's: `port` and `idleShutdownSecs` change daemon behaviour, `pollMs` and
+`showCard` change what the footer does.
+
 ## How it works
 
 ```text
@@ -85,9 +105,12 @@ Other clients can use MCP Streamable HTTP at `/mcp/<backend>`.
 
 ## Configuration
 
-Edit `~/.config/onesystem/onesystem.jsonc`. The `.json` filename also works.
-See the [annotated template](onesystem.config.jsonc) for backend examples.
+Edit `~/.config/onesystem/onesystem.jsonc`. There is one path: a missing file is an error
+naming it, not a fallback to some other config. See the
+[annotated template](onesystem.config.jsonc) for backend examples.
 Its paths are placeholders; `install <model>` writes the real paths.
+
+Most of it is editable from inside OpenCode with the `/onesystem` menu.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
