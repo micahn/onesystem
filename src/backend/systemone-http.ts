@@ -23,6 +23,7 @@
 
 import type { SystemOneBackend } from "../config.ts"
 import { describeError, startDeadline } from "../async.ts"
+import { emptyUsage, record } from "./usage.ts"
 import { logger } from "../log.ts"
 import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
@@ -44,6 +45,7 @@ export class SystemOneBackendImpl implements Backend {
   #reachable: boolean | null = null
   #lastActivityAt = Date.now()
   #inflight = 0
+  #usage = emptyUsage()
 
   constructor(
     readonly name: string,
@@ -73,7 +75,13 @@ export class SystemOneBackendImpl implements Backend {
     // is exempt from the idle sweep; see BackendStatus#local.
   }
 
-  async call(ctx: CallContext): Promise<unknown> {
+  call(ctx: CallContext): Promise<unknown> {
+    // Wrapped rather than awaited, so one place times the whole call including the
+    // unsupported-method and unknown-tool rejections above, which are errors the user sees.
+    return record(this.#usage, () => this.#doCall(ctx), () => this.#now())
+  }
+
+  async #doCall(ctx: CallContext): Promise<unknown> {
     this.#inflight++
     this.#lastActivityAt = this.#now()
     try {
@@ -149,6 +157,7 @@ export class SystemOneBackendImpl implements Backend {
       local: false,
       inflight: this.#inflight,
       idleMs: this.#now() - this.#lastActivityAt,
+      ...this.#usage,
       baseUrl: this.spec.baseUrl,
       reachable: this.#reachable,
     }

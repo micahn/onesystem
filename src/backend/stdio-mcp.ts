@@ -46,6 +46,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import type { StdioBackend } from "../config.ts"
 import { describeError } from "../async.ts"
+import { emptyUsage, record } from "./usage.ts"
 import { logger } from "../log.ts"
 import { BackendError, type Backend, type BackendState, type BackendStatus, type CallContext } from "./types.ts"
 
@@ -86,6 +87,7 @@ export class StdioMcpBackend implements Backend {
   #starting: Promise<void> | null = null
   #lastActivityAt = Date.now()
   #inflight = 0
+  #usage = emptyUsage()
   /**
    * Bumped by every quiesce. A start that began under an older generation is stale, and
    * must tear its own child down rather than publish it.
@@ -221,14 +223,14 @@ export class StdioMcpBackend implements Backend {
     this.#inflight++
     this.#lastActivityAt = this.#now()
     try {
-      return await client.request(
+      return await record(this.#usage, () => client.request(
         { method, params: ctx.params ?? {} } as never,
         schema as never,
         // Both halves of the deadline. The signal is what actually cancels; the timeout
         // is what stops the SDK applying its own 60s default, which is shorter than the
         // 120s onesystem is configured for.
         { signal: ctx.signal, timeout: ctx.timeoutMs },
-      )
+      ), () => this.#now())
     } catch (err) {
       if (ctx.signal?.aborted) {
         throw new BackendError(this.name, `${ctx.method} was cancelled: ${describeError(err)}`, err)
@@ -250,6 +252,7 @@ export class StdioMcpBackend implements Backend {
       local: true,
       inflight: this.#inflight,
       idleMs: this.#now() - this.#lastActivityAt,
+      ...this.#usage,
       command: this.spec.command.join(" "),
       generation: this.#generation,
     }

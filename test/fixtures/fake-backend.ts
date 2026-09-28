@@ -16,6 +16,7 @@
 
 import type { Backend, BackendState, BackendStatus, CallContext } from "../../src/backend/types.ts"
 import { BackendError } from "../../src/backend/types.ts"
+import { emptyUsage, finish } from "../../src/backend/usage.ts"
 
 export interface FakeBackendOptions {
   name?: string
@@ -42,6 +43,7 @@ export class FakeBackend implements Backend {
   quiesceCount = 0
   /** True between a call starting and finishing. */
   busy = false
+  #usage = emptyUsage()
   #state: BackendState = "cold"
   #idleMs = 0
   #result: unknown
@@ -73,10 +75,18 @@ export class FakeBackend implements Backend {
     this.busy = true
     this.#state = "warm"
     this.#idleMs = 0
+    const started = Date.now()
     try {
-      if (ctx.method === "tools/list") return { tools: this.#tools }
+      if (ctx.method === "tools/list") {
+        finish(this.#usage, Date.now() - started, false)
+        return { tools: this.#tools }
+      }
       if (this.#fail) throw this.#fail
+      finish(this.#usage, Date.now() - started, false)
       return this.#result
+    } catch (err) {
+      finish(this.#usage, Date.now() - started, true)
+      throw err
     } finally {
       this.busy = false
       this.#idleMs = 0
@@ -96,6 +106,7 @@ export class FakeBackend implements Backend {
       inflight: this.busy ? 1 : 0,
       idleMs: this.#idleMs,
       local: this.local,
+      ...this.#usage,
     }
   }
 }
@@ -136,6 +147,10 @@ export class HangingBackend implements Backend {
       inflight: this.#state === "warm" ? ++this.inflightSeen : 0,
       idleMs: 0,
       local: true,
+      calls: 0,
+      errors: 0,
+      lastMs: null,
+      meanMs: null,
     }
   }
 }

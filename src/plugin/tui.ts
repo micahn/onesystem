@@ -50,6 +50,31 @@ type Tone = "info" | "success" | "warning" | "error"
 type Line = { text: string; tone: Tone }
 
 /**
+ * The detail view.
+ *
+ * Usage is here because the question it answers is the one you cannot answer from the
+ * footer: is the model actually being used, and is it keeping up. Counters are per
+ * daemon-lifetime, so they reset when it restarts -- which is itself the signal, since a
+ * daemon that has restarted recently is one that went idle.
+ *
+ * No tokens, deliberately. See BackendStatus.
+ */
+export function statusReport(health: HealthReport | null, base: string | null): string {
+  if (!health) return `no daemon is answering${base ? ` at ${base}` : ""}`
+
+  const lines = [`daemon  ${base}   up ${Math.round(health.uptimeMs / 1000)}s`]
+  for (const b of health.backends) {
+    const ms = b.lastMs === null ? "no calls yet" : `last ${b.lastMs}ms  mean ${b.meanMs}ms`
+    lines.push(
+      `  ${b.name}  ${b.state}  ${b.calls} calls${b.errors ? `, ${b.errors} failed` : ""}` +
+        `  ${ms}${b.inflight ? `  ${b.inflight} in flight` : ""}`,
+    )
+  }
+  lines.push(`idle window ${health.idleShutdownSecs}s`)
+  return lines.join("\n")
+}
+
+/**
  * One line, for one daemon.
  *
  * Kept as a pure function of the report so it can be asserted without a terminal — the
@@ -148,15 +173,7 @@ export default Plugin.define({
         ],
       })
       if (choice === "status") {
-        const health = base ? await probeHealth(base) : null
-        const lines = health
-          ? [
-              `daemon: ${base}`,
-              `backends: ${health.backends.map((b) => `${b.name} ${b.state}${b.inflight ? ` (${b.inflight} in flight)` : ""}`).join(", ") || "none"}`,
-              `idle window: ${health.idleShutdownSecs}s`,
-            ]
-          : ["no daemon is answering"]
-        await ctx.ui.dialog.alert({ title: "onesystem", message: lines.join("\n") })
+        await ctx.ui.dialog.alert({ title: "onesystem", message: statusReport(base ? await probeHealth(base) : null, base) })
         return
       }
       if (!choice?.startsWith("install:")) return

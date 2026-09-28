@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { statusLine } from "../src/plugin/tui.ts"
+import { statusLine, statusReport } from "../src/plugin/tui.ts"
 import { healthReport } from "../src/health.ts"
 import type { BackendStatus } from "../src/backend/types.ts"
 
@@ -20,6 +20,10 @@ function backend(over: Partial<BackendStatus> = {}): BackendStatus {
     inflight: 0,
     idleMs: 0,
     local: true,
+    calls: 0,
+    errors: 0,
+    lastMs: null,
+    meanMs: null,
     ...over,
   }
 }
@@ -74,5 +78,36 @@ describe("status line", () => {
 
   test("a daemon with no backends at all is distinguished from a cold one", () => {
     expect(statusLine(report())).toEqual({ text: "onesystem: up, no backends", tone: "warning" })
+  })
+})
+
+
+describe("the detail view", () => {
+  const withCalls = report(
+    backend({ name: "laya", state: "warm", calls: 42, errors: 2, lastMs: 29, meanMs: 310, inflight: 1 }),
+    backend({ name: "julia", state: "cold" }),
+  )
+
+  test("shows calls, failures and latency per model", () => {
+    const out = statusReport(withCalls, "http://127.0.0.1:7331")
+    expect(out).toContain("42 calls, 2 failed")
+    expect(out).toContain("last 29ms  mean 310ms")
+    expect(out).toContain("1 in flight")
+    expect(out).toContain("idle window 600s")
+  })
+
+  test("a model that has never been called says so rather than showing 0ms", () => {
+    // Zero would read as "instant", which is a claim. "no calls yet" is the truth and is
+    // the more useful thing to see about a cold model.
+    expect(statusReport(withCalls, null)).toContain("no calls yet")
+  })
+
+  test("a model with no failures does not mention failures", () => {
+    const out = statusReport(report(backend({ calls: 1, errors: 0 })), null)
+    expect(out).not.toContain("failed")
+  })
+
+  test("a daemon that is not running says so plainly", () => {
+    expect(statusReport(null, "http://127.0.0.1:7331")).toContain("no daemon is answering")
   })
 })

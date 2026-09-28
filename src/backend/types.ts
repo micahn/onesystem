@@ -72,6 +72,22 @@ export interface BackendStatus {
    * transport can be added without also updating every predicate that switches on it.
    */
   local: boolean
+  /**
+   * Usage, since the daemon started.
+   *
+   * Deliberately not token counts. Neither model reports them — laya answers with
+   * `answers`, `routing`, `latency_ms` and `device`, julia with `answers` alone — and a
+   * locally-run model bills nothing, so a number here would be a guess wearing a
+   * counter's clothes. What is worth knowing is how often the model is being used and how
+   * long it takes, because that is what says whether the idle window is doing its job.
+   */
+  calls: number
+  /** Calls that ended in a `BackendError`. */
+  errors: number
+  /** Wall-clock of the last completed call, or null if there has not been one. */
+  lastMs: number | null
+  /** Mean wall-clock over every completed call. Null until the first one. */
+  meanMs: number | null
 }
 
 export interface Backend {
