@@ -101,7 +101,8 @@ list, grouped:
 | Show status | The same snapshot the sidebar card renders. |
 | Restart daemon | Reloads models. Drops warm ones, so the next call pays the load. |
 | Enable / Disable `<model>` | Per model, independently. Restarts the daemon after. |
-| Install `<model>` | Confirms first, since it is a several-GB download. |
+| Install `<model>` | Confirms first, since it is a several-GB download. Only for models not already on disk. |
+| Uninstall `<model>` | Removes the runtime. Only for models that are on disk. |
 | Daemon port, Idle window | Written to the config. Restarts the daemon after. |
 | Poll interval, Sidebar card | OpenCode plugin state, applied without a restart. |
 
@@ -111,6 +112,10 @@ effect until it restarts. The menu restarts it for you, which unloads whatever i
 Plugin settings live in OpenCode's own store rather than `onesystem.jsonc`, because they
 are not the daemon's: `port` and `idleShutdownSecs` change daemon behaviour, `pollMs` and
 `showCard` change what the footer does.
+
+Uninstalling leaves the backend block in the config, so the menu warns when the model it
+removed is still enabled there — an enabled backend with no runtime behind it is what turns
+later calls into 500s. Weights are kept either way.
 
 ## How it works
 

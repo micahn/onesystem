@@ -20,6 +20,7 @@ import {
   switchToBackend,
   type NumericSetting,
 } from "../config-edit.ts"
+import { listRuntimes } from "../install.ts"
 import { describeError } from "../async.ts"
 import { defaultCli, resolveBase, run } from "./discover.ts"
 import {
@@ -394,7 +395,7 @@ export default Plugin.define({
       const config = probe.config
       const choice = await ctx.ui.dialog.select<MenuValue>({
         title: "onesystem",
-        options: topMenu(probe, normalizeSettings(settings)),
+        options: topMenu(probe, normalizeSettings(settings), await listRuntimes()),
       })
       if (!choice) return
 
@@ -491,6 +492,41 @@ export default Plugin.define({
         } catch (err) {
           ctx.ui.toast.show({ title: "not changed", message: describeError(err), variant: "error" })
         }
+        return
+      }
+
+      if (choice.startsWith("uninstall:")) {
+        const name = choice.slice("uninstall:".length)
+        const ok = await ctx.ui.dialog.confirm({
+          title: `Uninstall ${name}?`,
+          message: `This deletes the ${name} runtime, which is several GB. Downloaded weights are kept, and the ${name} block in the config is left as it is.`,
+          label: { confirm: "Uninstall", cancel: "Cancel" },
+        })
+        if (!ok) return
+
+        ctx.ui.toast.show({ message: `removing the ${name} runtime`, variant: "info" })
+        const code = await run(cli.command, [...cli.args, "uninstall", name])
+        if (code !== 0) {
+          ctx.ui.toast.show({
+            title: `could not uninstall ${name}`,
+            message: `\`onesystem uninstall ${name}\` exited ${code}. Run it in a terminal to see why.`,
+            variant: "error",
+          })
+          return
+        }
+        // The runtime is gone but the config still names it, and an enabled backend with
+        // no runtime behind it is what turns every later call into a 500.
+        const still = await probeConfig()
+        const on = still.config && backendStates(still.config).find((b) => b.name === name)?.enabled
+        ctx.ui.toast.show(
+          on
+            ? {
+                title: `${name} uninstalled`,
+                message: `its config block is still enabled, so its tools will now fail. Disable it here, or \`onesystem use <model>\`.`,
+                variant: "warning",
+              }
+            : { message: `${name} uninstalled`, variant: "success" },
+        )
         return
       }
 

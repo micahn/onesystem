@@ -15,6 +15,12 @@ export interface PluginSettings {
   showCard: boolean
 }
 
+/** What is on disk, as `listRuntimes` reports it. */
+export interface RuntimeInfo {
+  name: string
+  installed: boolean
+}
+
 export const DEFAULT_SETTINGS: PluginSettings = { pollMs: 4_000, showCard: true }
 
 /** Clamp stored settings, which may come from an older version or a hand edit. */
@@ -33,6 +39,7 @@ export type MenuValue =
   | "config:repair"
   | `model:${string}`
   | `install:${string}`
+  | `uninstall:${string}`
   | `setting:${NumericSetting}`
   | "setting:pollMs"
   | "setting:showCard"
@@ -92,7 +99,11 @@ export function commandLayer(open: () => void): () => CommandLayer {
  * from no file: the model rows quietly disappeared and the menu read as though nothing
  * was installed.
  */
-export function topMenu(probe: ConfigProbe, settings: PluginSettings): MenuOption[] {
+export function topMenu(
+  probe: ConfigProbe,
+  settings: PluginSettings,
+  runtimes: RuntimeInfo[] = [],
+): MenuOption[] {
   const config = probe.config
   const opts: MenuOption[] = []
 
@@ -124,12 +135,28 @@ export function topMenu(probe: ConfigProbe, settings: PluginSettings): MenuOptio
     }
   }
 
+  // Split by what is on disk. Offering to install something already installed reads as
+  // though the menu has no idea, and the model list is the one thing here that is several
+  // gigabytes either way.
+  const onDisk = new Set(runtimes.filter((r) => r.installed).map((r) => r.name))
   for (const { name } of MODELS) {
+    if (onDisk.has(name)) continue
     opts.push({
       title: `Install ${name}`,
       value: `install:${name}`,
       description: "downloads its own torch; several GB",
       category: "Install",
+    })
+  }
+
+  // Every installed runtime, not only the ones this build knows about: a model dropped
+  // from the table is still taking up disk and should still be removable.
+  for (const name of onDisk) {
+    opts.push({
+      title: `Uninstall ${name}`,
+      value: `uninstall:${name}`,
+      description: "removes the runtime; its config block stays",
+      category: "Uninstall",
     })
   }
 

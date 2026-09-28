@@ -36,12 +36,12 @@ const probe = (cfg?: Config, problems: ConfigProblem[] = []) => ({
 const values = (opts: { value: MenuValue }[]) => opts.map((o) => o.value)
 const categories = (opts: { category?: string }[]) => [...new Set(opts.map((o) => o.category ?? ""))]
 
-describe("the menu", () => {
-  const full = config({
-    laya: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"] },
-    julia: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"], enabled: false },
-  })
+const full = config({
+  laya: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"] },
+  julia: { transport: "stdio-mcp", command: ["/bin/true"], tools: ["predict"], enabled: false },
+})
 
+describe("the menu", () => {
   test("it offers status, restart, both models, and both settings", () => {
     const v = values(topMenu(probe(full), DEFAULT_SETTINGS))
     expect(v).toContain("status")
@@ -360,5 +360,78 @@ describe("the repair handler", () => {
     const src = await tui()
     expect(src).toContain("await probeConfig()")
     expect(src).not.toContain("loadConfig().then")
+  })
+})
+
+describe("install and uninstall are the same list, split by what is on disk", () => {
+  const disk = (...names: string[]) => names.map((name) => ({ name, installed: true }))
+
+  test("an installed model is not still offered for install", () => {
+    // Offering to install something already installed reads as though the menu has no idea,
+    // and this is several gigabytes either way.
+    const v = values(topMenu(probe(full), DEFAULT_SETTINGS, disk("laya")))
+    expect(v).not.toContain("install:laya")
+    expect(v).toContain("install:julia")
+  })
+
+  test("an installed model appears under uninstall", () => {
+    const opts = topMenu(probe(full), DEFAULT_SETTINGS, disk("laya"))
+    const row = opts.find((o) => o.value === "uninstall:laya")!
+    expect(row.title).toBe("Uninstall laya")
+    expect(row.category).toBe("Uninstall")
+    // The config block survives, which is a trap the row should name.
+    expect(row.description).toContain("config block stays")
+  })
+
+  test("the two sections are mutually exclusive", () => {
+    const both = values(topMenu(probe(full), DEFAULT_SETTINGS, disk("laya", "julia")))
+    for (const name of ["laya", "julia"]) {
+      expect(`${name} install: ${both.includes(`install:${name}`)}`).toBe(`${name} install: false`)
+      expect(`${name} uninstall: ${both.includes(`uninstall:${name}`)}`).toBe(`${name} uninstall: true`)
+    }
+    // And with nothing installed, neither half of that flips the wrong way.
+    const neither = values(topMenu(probe(full), DEFAULT_SETTINGS, []))
+    expect(neither).toContain("install:laya")
+    expect(neither).not.toContain("uninstall:laya")
+  })
+
+  test("a runtime this build no longer knows about is still removable", () => {
+    // A model dropped from the table is still on disk and still taking up space.
+    const v = values(topMenu(probe(full), DEFAULT_SETTINGS, disk("retired-model")))
+    expect(v).toContain("uninstall:retired-model")
+    expect(v.some((x) => x.startsWith("install:retired-model"))).toBe(false)
+  })
+
+  test("a half-installed runtime counts as not installed", () => {
+    // listRuntimes reports a directory without meta.json as not installed, which is the
+    // case where offering Install is right.
+    const v = values(topMenu(probe(full), DEFAULT_SETTINGS, [{ name: "laya", installed: false }]))
+    expect(v).toContain("install:laya")
+    expect(v).not.toContain("uninstall:laya")
+  })
+
+  test("the ordering puts each section together", () => {
+    const opts = topMenu(probe(full), DEFAULT_SETTINGS, disk("laya"))
+    expect(categories(opts)).toEqual(["", "Models", "Install", "Uninstall", "Settings"])
+  })
+
+  test("nothing on disk behaves exactly as it did before runtimes were known", () => {
+    expect(values(topMenu(probe(full), DEFAULT_SETTINGS))).toEqual(
+      values(topMenu(probe(full), DEFAULT_SETTINGS, [])),
+    )
+  })
+
+  test("uninstall:${name} is a value the dialog routes", async () => {
+    const src = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+    expect(src).toContain('choice.startsWith("uninstall:")')
+    expect(src).toContain('"uninstall", name')
+  })
+
+  test("uninstalling something that leaves the config enabled says so", async () => {
+    // An enabled backend with no runtime behind it is what turns every later call into a
+    // 500, and `uninstall` only removes the directory.
+    const src = await readFile(join(import.meta.dir, "..", "..", "src", "plugin", "tui.ts"), "utf8")
+    const afterUninstall = src.indexOf("await run(cli.command, [...cli.args, \"uninstall\", name])")
+    expect(src.indexOf("still enabled", afterUninstall)).toBeGreaterThan(afterUninstall)
   })
 })
