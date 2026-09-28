@@ -158,10 +158,52 @@ export function validate(raw: unknown, source: string): Config {
         serverName: entry.serverName as string | undefined,
         enabled: entry.enabled !== false,
       }
+    } else if (transport === "systemone-serve") {
+      if (!Array.isArray(entry.command) || entry.command.some((c) => typeof c !== "string")) {
+        throw new Error(`${source}: backends.${name}.command must be a string array, naming the program first`)
+      }
+      if (typeof entry.baseUrl !== "string" || !entry.baseUrl.startsWith("http")) {
+        throw new Error(`${source}: backends.${name}.baseUrl must be an http(s) URL`)
+      }
+      if (typeof entry.model !== "string" || entry.model.length === 0) {
+        // The service selects by name and will not guess, so a missing one is a 422 on
+        // every call rather than a startup error.
+        throw new Error(
+          `${source}: backends.${name}.model is required; the service has no default model. ` +
+            `Use one from its /v1/models.`,
+        )
+      }
+      if (!Array.isArray(entry.tools) || entry.tools.length === 0) {
+        throw new Error(
+          `${source}: backends.${name}.tools must be a non-empty string array, naming the tools ` +
+            `this backend exposes without its product prefix.`,
+        )
+      }
+      backends[name] = {
+        transport,
+        command: entry.command as string[],
+        cwd: entry.cwd as string | undefined,
+        env: entry.env as Record<string, string> | undefined,
+        baseUrl: (entry.baseUrl as string).replace(/\/+$/, ""),
+        healthPath: entry.healthPath as string | undefined,
+        systemonePath: entry.systemonePath as string | undefined,
+        model: entry.model as string,
+        // Longer than the http default: this transport owns the child's startup, and these
+        // load weights before they report ready.
+        startupTimeoutSecs: requireNumber(
+          entry.startupTimeoutSecs,
+          `${source}: backends.${name}.startupTimeoutSecs`,
+          300,
+        ),
+        toolPrefix: entry.toolPrefix as string | undefined,
+        serverName: entry.serverName as string | undefined,
+        tools: entry.tools as string[],
+        enabled: entry.enabled !== false,
+      }
     } else {
       throw new Error(
-        `${source}: backends.${name}.transport must be "stdio-mcp" or "systemone-http", ` +
-          `got ${JSON.stringify(transport)}`,
+        `${source}: backends.${name}.transport must be "stdio-mcp", "systemone-http" or ` +
+          `"systemone-serve", got ${JSON.stringify(transport)}`,
       )
     }
   }

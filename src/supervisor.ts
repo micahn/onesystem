@@ -11,6 +11,7 @@ import { describeError, startDeadline, withTimeout } from "./async.ts"
 import { logger } from "./log.ts"
 import { StdioMcpBackend } from "./backend/stdio-mcp.ts"
 import { SystemOneBackendImpl, type FetchLike } from "./backend/systemone-http.ts"
+import { SystemOneServeBackend } from "./backend/systemone-serve.ts"
 import { BackendError, type Backend, type BackendPort, type BackendStatus } from "./backend/types.ts"
 
 const log = logger("supervisor")
@@ -49,9 +50,11 @@ export class Supervisor implements BackendPort {
       this.deps.createBackend ??
       ((name, spec) => {
         const now = this.deps.now
-        return spec.transport === "stdio-mcp"
-          ? new StdioMcpBackend(name, spec, { now })
-          : new SystemOneBackendImpl(name, spec, { fetch: this.deps.fetch, now })
+        if (spec.transport === "stdio-mcp") return new StdioMcpBackend(name, spec, { now })
+        if (spec.transport === "systemone-serve") {
+          return new SystemOneServeBackend(name, spec, { fetch: this.deps.fetch, now })
+        }
+        return new SystemOneBackendImpl(name, spec, { fetch: this.deps.fetch, now })
       })
 
     for (const [name, spec] of Object.entries(config.backends)) {

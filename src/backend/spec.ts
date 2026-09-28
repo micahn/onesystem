@@ -3,7 +3,7 @@
  * Runtime interfaces and status types live in backend/types.ts.
  */
 
-export type Transport = "stdio-mcp" | "systemone-http"
+export type Transport = "stdio-mcp" | "systemone-http" | "systemone-serve"
 
 /**
  * Display names. Strip only the declared tool prefix; leave names unchanged when unset.
@@ -44,7 +44,34 @@ export interface SystemOneBackend extends BackendNaming {
   startupTimeoutSecs?: number
 }
 
-export type BackendSpec = StdioBackend | SystemOneBackend
+/**
+ * A `/v1/systemone` service that onesystem launches, rather than one already running.
+ *
+ * `cwd` is part of the contract and not a convenience: these servers resolve their weights
+ * and their own runtime relative to where they were started, so a spawn without it finds
+ * nothing. `model` is required because the service selects by name and has no default.
+ */
+export interface ServeBackend extends BackendNaming {
+  transport: "systemone-serve"
+  command: string[]
+  cwd?: string
+  env?: Record<string, string>
+  /** Base URL the service binds, without any path. */
+  baseUrl: string
+  /** Polled until `{"status":"ready"}`. A 200 alone means the port is up, not the model. */
+  healthPath?: string
+  systemonePath?: string
+  /** Model name the service is asked for. It has no default and will not guess one. */
+  model: string
+  startupTimeoutSecs?: number
+  /**
+   * Required, so `/catalog` answers without loading weights. Stale names fail at call
+   * time with the service's own "unknown tool".
+   */
+  tools: string[]
+}
+
+export type BackendSpec = StdioBackend | SystemOneBackend | ServeBackend
 
 /** A declared backend, plus whether the person writing the file turned it on. */
 export type ConfiguredBackend = BackendSpec & { enabled?: boolean }
