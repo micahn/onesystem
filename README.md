@@ -35,6 +35,20 @@ milliseconds.
 [Manual install](#manual-install) · [Julia or a custom path](#installer-options) ·
 [Existing laya setup](#existing-laya-setup)
 
+## Wiki
+
+[`wiki/`](wiki/Home.md) documents what this is for: where a decision engine fits in an
+agent workflow, what a model has to provide to be usable here, and which of the installed
+engines to reach for. It is an Obsidian vault, but the links are ordinary relative Markdown
+so it reads on GitHub too.
+
+The short version, because it is the part that is easy to get wrong: all the engines take
+the same `{state, questions}` payload and are **not** interchangeable. `state` must be an
+object for laya and a string for julia, and rizzo is the only one that takes either. The
+engines also disagree about their own answer format, so a reader that parses all three the
+same way will silently mis-score two of them. Start at
+[what a model has to provide](wiki/reference/compatibility.md).
+
 ## Use
 
 The plugin starts the shared daemon as needed. To run commands yourself, open the

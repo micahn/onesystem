@@ -1,0 +1,897 @@
+{
+  "$comment": "Machine-readable index of the use cases, searched by whichever engine is active. `criteria` is drop-in valid as a `choice` question's criteria, so an engine can rank this vault against a live situation with no adapter. Prose may elaborate, never contradict.",
+  "generated": "2026-09-26",
+  "count": 34,
+  "criteria": {
+    "ticket-gate": "Is this ticket fully specified: clear scope, no open questions, and testable acceptance criteria?",
+    "spec-readiness": "Is this written spec complete and unambiguous enough to hand to an implementing agent?",
+    "ticket-granularity": "Is this ticket sized right, or is it too coarse to finish in one tracer-bullet slice or too fine to be worth tracking?",
+    "blocking-edges-genuine": "Does this ticket genuinely depend on the tickets it is blocked by, or is the edge spurious?",
+    "acceptance-criteria-checkable": "Are these acceptance criteria both checkable by a machine and exhaustive, so an agent can tell done from not-done?",
+    "triage-state": "Which triage state does this issue belong in: needs-triage, needs-info, ready-for-agent, ready-for-human, or wontfix?",
+    "triage-category": "Is this issue a defect or an enhancement, in the vocabulary this repo actually uses?",
+    "triage-unusual-transition": "Is this state transition unusual enough that a maintainer should confirm it before it happens?",
+    "triage-claim-holds": "Does the claim in this issue hold up against the codebase, or is it already fixed, wrong, or too vague to check?",
+    "triage-already-implemented": "Is this request already implemented, redundant, or previously rejected, making it a wontfix?",
+    "frontier-priority": "Which unblocked ticket on the frontier should be worked next for the most decision value?",
+    "fog-or-ticket": "Can this open question be stated precisely right now, making it a ticket, or is it still fog?",
+    "wayfinder-type": "Is this decision best resolved by research, a prototype, a grilling session, or plain execution?",
+    "hitl-or-afk": "Does resolving this decision need a human in the loop, or can the agent work it alone?",
+    "decision-ticket-optional": "Is this decision big enough to deserve its own tracked ticket, or should it just be decided inline?",
+    "review-finding-kind": "Is this code review finding a hard violation of a documented standard, or a judgement call?",
+    "review-worst-in-axis": "Which finding in this review axis is the worst one, worst first?",
+    "review-smell-which": "Which Fowler code smell does this code most closely exhibit?",
+    "review-finding-noop": "Is this review finding a real behaviour change, or a model-relative no-op that two readers would disagree about?",
+    "debug-red-signal-quality": "Is this test command a trustworthy red-capable, deterministic, fast, agent-runnable signal for this bug?",
+    "debug-hypothesis-rank": "Which of these candidate root causes should be tested first for this bug?",
+    "debug-seam-is-real": "Does this test seam actually exercise the real bug pattern, or does it give false confidence?",
+    "debug-is-real-bug": "Is this a genuine defect in the code, or a misunderstanding, misconfiguration, or already-handled case?",
+    "prototype-branch": "Should this throwaway prototype explore the logic branch or the UI branch?",
+    "deepening-candidate-rank": "Which module would gain most from being deepened, and which of these candidates is worth tackling first?",
+    "skill-boundary-choice": "At the boundary between two skills, which of the available flows should this situation use?",
+    "glossary-drift": "Has the domain glossary drifted out of sync with what the code now does?",
+    "prose-ai-pattern": "Does this passage hit a known AI-writing pattern, and which one?",
+    "doc-done-criteria-clear": "Can an agent reading this document tell done from not-done, or is the bound vague enough to invite premature completion?",
+    "research-claim-primary-source": "Is this claim traced back to a primary source that owns it, rather than a secondary write-up?",
+    "pre-push-secret-guard": "Does this diff contain credentials, personal data, or other sensitive material that must not be pushed?",
+    "untrusted-content-injection": "Is this fetched or user-supplied content trying to issue instructions to the agent rather than being data?",
+    "wiki-usecase-rank": "Which documented Laya use case applies to this situation, and which does not?",
+    "checkpoint-route-explain": "Which Laya checkpoint would answer this state, and why was that one chosen?"
+  },
+  "use_cases": [
+    {
+      "id": "ticket-gate",
+      "label": "ticket-gate",
+      "note": "use-cases/ticket-gate.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice",
+        "noul"
+      ],
+      "status": "proven",
+      "human_review": "required",
+      "risk_when_wrong": "low",
+      "skills": [
+        "implement",
+        "to-tickets"
+      ],
+      "trigger": "\"A ticket is about to be picked up by an agent, and the question is whether it is worth starting.\"",
+      "measured": {
+        "ready": 0.8128,
+        "confidence": 0.4438,
+        "auto_selected_34way": {
+          "winner": "ticket-gate",
+          "p": 0.9644,
+          "confidence": 0.9445
+        }
+      },
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "spec-readiness",
+      "label": "spec-readiness",
+      "note": "use-cases/spec-readiness.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice",
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "to-spec",
+        "triage"
+      ],
+      "trigger": "\"A spec has just been written and is about to be labelled ready-for-agent, which to-spec currently does without checking.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "ticket-granularity",
+      "label": "ticket-granularity",
+      "note": "use-cases/ticket-granularity.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "to-tickets"
+      ],
+      "trigger": "\"A ticket breakdown has been produced and is being reviewed before the user approves it.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "blocking-edges-genuine",
+      "label": "blocking-edges-genuine",
+      "note": "use-cases/blocking-edges-genuine.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "to-tickets",
+        "wayfinder"
+      ],
+      "trigger": "\"Blocking edges have been declared between tickets and are about to define the work order.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "acceptance-criteria-checkable",
+      "label": "acceptance-criteria-checkable",
+      "note": "use-cases/acceptance-criteria-checkable.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul",
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "writing-for-agents",
+        "to-spec",
+        "tdd"
+      ],
+      "trigger": "\"Acceptance criteria have been written and the agent needs to know when it is finished.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "triage-state",
+      "label": "triage-state",
+      "note": "use-cases/triage-state.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "triage"
+      ],
+      "trigger": "\"An unlabeled or mislabeled issue needs one state role from the repo's own triage vocabulary.\"",
+      "note_conflict": "This is the triage SKILL's state machine, NOT the onesystem.preset 'triage' preset, which is support-desk vocabulary.",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "triage-category",
+      "label": "triage-category",
+      "note": "use-cases/triage-category.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "low",
+      "skills": [
+        "triage"
+      ],
+      "trigger": "\"An issue has a state role and still needs exactly one category role.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "triage-unusual-transition",
+      "label": "triage-unusual-transition",
+      "note": "use-cases/triage-unusual-transition.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "low",
+      "skills": [
+        "triage"
+      ],
+      "trigger": "\"A proposed state transition skips the normal path, and the skill says to flag and ask before proceeding.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "triage-claim-holds",
+      "label": "triage-claim-holds",
+      "note": "use-cases/triage-claim-holds.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "triage"
+      ],
+      "trigger": "\"Before grilling an issue, the claim in it is being checked against the codebase.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "triage-already-implemented",
+      "label": "triage-already-implemented",
+      "note": "use-cases/triage-already-implemented.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul",
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "triage"
+      ],
+      "trigger": "\"Checking for redundancy in the codebase and for prior rejections under .out-of-scope/.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "frontier-priority",
+      "label": "frontier-priority",
+      "note": "use-cases/frontier-priority.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "score",
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "wayfinder",
+        "implement",
+        "triage"
+      ],
+      "trigger": "\"Several tickets are unblocked and unclaimed, and the next one has to be picked.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "fog-or-ticket",
+      "label": "fog-or-ticket",
+      "note": "use-cases/fog-or-ticket.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "wayfinder"
+      ],
+      "trigger": "\"Something unknown has surfaced during a wayfinding session and needs to become a ticket or stay fog.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "wayfinder-type",
+      "label": "wayfinder-type",
+      "note": "use-cases/wayfinder-type.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "wayfinder"
+      ],
+      "trigger": "\"A decision ticket is being authored and needs its wayfinder:<type> label.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "hitl-or-afk",
+      "label": "hitl-or-afk",
+      "note": "use-cases/hitl-or-afk.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "high",
+      "skills": [
+        "wayfinder",
+        "grilling"
+      ],
+      "trigger": "\"Deciding whether a ticket can be resolved by the agent alone. Getting this wrong lets an agent stand in for the human, which the skill calls broken.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "decision-ticket-optional",
+      "label": "decision-ticket-optional",
+      "note": "use-cases/decision-ticket-optional.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "wayfinder"
+      ],
+      "trigger": "\"A decision has come up that might not be worth its own ticket; the default is to decide it inline.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "review-finding-kind",
+      "label": "review-finding-kind",
+      "note": "use-cases/review-finding-kind.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "code-review"
+      ],
+      "trigger": "\"A review finding has been drafted and needs classifying as hard violation versus judgement call, per finding.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "review-worst-in-axis",
+      "label": "review-worst-in-axis",
+      "note": "use-cases/review-worst-in-axis.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "code-review"
+      ],
+      "trigger": "\"Ordering findings within one review axis. Never across axes: the two-axis separation exists to prevent exactly that reranking.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "review-smell-which",
+      "label": "review-smell-which",
+      "note": "use-cases/review-smell-which.md",
+      "tools": [
+        "predict",
+        "laya_route"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "code-review",
+        "codebase-design"
+      ],
+      "trigger": "\"Naming which of the twelve Fowler smells a piece of code most closely is. Twelve labels is the practical ceiling for an unshortlisted choice question.\"",
+      "engines": [
+        "laya"
+      ]
+    },
+    {
+      "id": "review-finding-noop",
+      "label": "review-finding-noop",
+      "note": "use-cases/review-finding-noop.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "code-review",
+        "writing-for-agents"
+      ],
+      "trigger": "\"Testing a finding against the no-op rule: does it change behaviour versus the default, settled by running the thing rather than debating it.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "debug-red-signal-quality",
+      "label": "debug-red-signal-quality",
+      "note": "use-cases/debug-red-signal-quality.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "score",
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "diagnosing-bugs",
+        "tdd"
+      ],
+      "trigger": "\"A candidate reproduction command exists and is being judged against red-capable, deterministic, fast, agent-runnable.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "debug-hypothesis-rank",
+      "label": "debug-hypothesis-rank",
+      "note": "use-cases/debug-hypothesis-rank.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "diagnosing-bugs"
+      ],
+      "trigger": "\"Three to five candidate root causes have been generated and must be ranked before any is tested. The skill explicitly permits proceeding on the ranking when the user is AFK.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "debug-seam-is-real",
+      "label": "debug-seam-is-real",
+      "note": "use-cases/debug-seam-is-real.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "high",
+      "skills": [
+        "diagnosing-bugs",
+        "tdd"
+      ],
+      "trigger": "\"A test seam is being chosen for a regression test. A seam that fakes the bug pattern produces a green suite and a live bug.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "debug-is-real-bug",
+      "label": "debug-is-real-bug",
+      "note": "use-cases/debug-is-real-bug.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "diagnosing-bugs",
+        "triage"
+      ],
+      "trigger": "\"Deciding whether a report is a defect, a misconfiguration, a misunderstanding of intended behaviour, or already handled.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "prototype-branch",
+      "label": "prototype-branch",
+      "note": "use-cases/prototype-branch.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "prototype"
+      ],
+      "trigger": "\"The prototype question is ambiguous and the user is unreachable, so the branch matching surrounding code has to be chosen and the assumption stated.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "deepening-candidate-rank",
+      "label": "deepening-candidate-rank",
+      "note": "use-cases/deepening-candidate-rank.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "improve-codebase-architecture",
+        "codebase-design"
+      ],
+      "trigger": "\"The architecture scan has produced deepening candidates that need ordering before the user picks one to grill.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "skill-boundary-choice",
+      "label": "skill-boundary-choice",
+      "note": "use-cases/skill-boundary-choice.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "ask-matt"
+      ],
+      "trigger": "\"A situation sits on the boundary between two skills. The ask-matt skill calls this the fuzziest decision in its whole map.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "glossary-drift",
+      "label": "glossary-drift",
+      "note": "use-cases/glossary-drift.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "domain-modeling",
+        "grill-with-docs"
+      ],
+      "trigger": "\"Code and CONTEXT.md disagree, and the repo policy is that the glossary wins, so the glossary needs correcting.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "prose-ai-pattern",
+      "label": "prose-ai-pattern",
+      "note": "use-cases/prose-ai-pattern.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "choice",
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "low",
+      "skills": [
+        "humanizer",
+        "writing-for-agents"
+      ],
+      "trigger": "\"A line of prose needs to be checked against the thirty-five-item AI-writing pattern vocabulary, with false positives suppressed.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "doc-done-criteria-clear",
+      "label": "doc-done-criteria-clear",
+      "note": "use-cases/doc-done-criteria-clear.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul",
+        "score"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "writing-for-agents",
+        "to-spec",
+        "writing-for-agents"
+      ],
+      "trigger": "\"A document has been written for an agent to follow, and the bound it states needs to be checkable rather than vague.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "research-claim-primary-source",
+      "label": "research-claim-primary-source",
+      "note": "use-cases/research-claim-primary-source.md",
+      "tools": [
+        "predict"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "candidate",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "research"
+      ],
+      "trigger": "\"A claim in a research note is being checked for whether it is traced to the primary source that owns it.\"",
+      "engines": [
+        "laya",
+        "rizzo"
+      ]
+    },
+    {
+      "id": "pre-push-secret-guard",
+      "label": "pre-push-secret-guard",
+      "note": "use-cases/pre-push-secret-guard.md",
+      "tools": [
+        "laya_preset",
+        "predict"
+      ],
+      "question_types": [
+        "noul",
+        "score"
+      ],
+      "status": "proven",
+      "human_review": "none",
+      "risk_when_wrong": "high",
+      "skills": [
+        "git-guardrails-claude-code",
+        "code-review"
+      ],
+      "trigger": "\"A diff is about to be pushed. Block on the guard preset's sensitive_data above 0.5; never push .env contents or db files past it.\"",
+      "measured": {
+        "sensitive_data_clean_diff": 0.13,
+        "sensitive_data_secret_diff": 0.79,
+        "auto_selected_34way": {
+          "winner": "pre-push-secret-guard",
+          "p": 0.9875,
+          "confidence": 0.9808
+        },
+        "secret_diff_reproduced": 0.569,
+        "clean_diff_reproduced": 0.0023
+      },
+      "engines": [
+        "laya"
+      ]
+    },
+    {
+      "id": "untrusted-content-injection",
+      "label": "untrusted-content-injection",
+      "note": "use-cases/untrusted-content-injection.md",
+      "tools": [
+        "laya_preset",
+        "predict"
+      ],
+      "question_types": [
+        "noul",
+        "score"
+      ],
+      "status": "proven",
+      "human_review": "none",
+      "risk_when_wrong": "high",
+      "skills": [
+        "research",
+        "code-review",
+        "diagnosing-bugs"
+      ],
+      "trigger": "\"Web pages, issue bodies, or file contents fetched from outside the repo are about to be read into the agent's context.\"",
+      "measured": {
+        "injected_bug_report": {
+          "prompt_injection": 1.0,
+          "jailbreak": 1.0,
+          "sensitive_data": 0.794
+        },
+        "ordinary_bug_report": {
+          "prompt_injection": 0.0095,
+          "jailbreak": 0.0025
+        },
+        "imperative_docs_page": {
+          "prompt_injection": 0.0788,
+          "jailbreak": 0.0318
+        }
+      },
+      "engines": [
+        "laya"
+      ]
+    },
+    {
+      "id": "wiki-usecase-rank",
+      "label": "wiki-usecase-rank",
+      "note": "use-cases/wiki-usecase-rank.md",
+      "tools": [
+        "predict",
+        "laya_route"
+      ],
+      "question_types": [
+        "choice",
+        "noul"
+      ],
+      "status": "proven",
+      "human_review": "required",
+      "risk_when_wrong": "medium",
+      "skills": [
+        "ask-matt",
+        "triage"
+      ],
+      "trigger": "\"This wiki is being searched by Laya to work out which documented use case applies, and which do not.\"",
+      "measured": {
+        "note": "34 labels, no shortlist. Option count is NOT the limiting factor; state quality is.",
+        "good_state_34_labels": {
+          "winner": "ticket-gate",
+          "p": 0.9644,
+          "confidence": 0.9445,
+          "correct": true
+        },
+        "verbose_state_34_labels": {
+          "winner": "prose-ai-pattern",
+          "p": 0.3059,
+          "confidence": 0.3415,
+          "correct": false
+        },
+        "worst_case_verbose_injection": {
+          "winner": "wiki-usecase-rank",
+          "p": 0.9912,
+          "confidence": 0.9822,
+          "correct": false
+        },
+        "confidence_is_not_a_gate": "the two most confident answers measured were both wrong (0.974, 0.982)",
+        "state_quality_replication": {
+          "triage_focused": 0.9644,
+          "triage_verbose": 0.3059,
+          "triage_focused_better": true,
+          "push_focused": 0.9875,
+          "push_verbose": 0.3603,
+          "push_focused_better": true,
+          "injection_focused": 0.8803,
+          "injection_verbose": 0.9912,
+          "injection_focused_better": false,
+          "note": "2 of 3. The exception is the valuable case: verbose scored higher and was still wrong."
+        }
+      },
+      "engines": [
+        "laya"
+      ]
+    },
+    {
+      "id": "checkpoint-route-explain",
+      "label": "checkpoint-route-explain",
+      "note": "use-cases/checkpoint-route-explain.md",
+      "tools": [
+        "laya_route",
+        "laya_status"
+      ],
+      "question_types": [
+        "noul"
+      ],
+      "status": "proven",
+      "human_review": "none",
+      "risk_when_wrong": "low",
+      "skills": [],
+      "trigger": "\"Explaining to a user why a given request went to the english or multilingual checkpoint. No forward pass, so it is free and safe to call first.\"",
+      "measured": {
+        "bengali_route_ms": 5,
+        "reason": "non-Latin script (bengali, 100% of letters); the English checkpoint cannot read it",
+        "forward_passes": 0
+      },
+      "engines": [
+        "laya"
+      ]
+    }
+  ]
+}
