@@ -4,7 +4,7 @@ title: Is a spec ready for an agent
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice, noul]
 status: candidate
@@ -62,7 +62,8 @@ This use case is the check `to-spec` currently skips.
 
 ## Caveats
 
-- Four labels here, comfortably calibrated. Do not add a fifth "needs_estimate".
+- Four labels. Do not add a fifth "needs_estimate" — the note's own reasoning is that
+  the label set is small enough to reason about, not that it sits inside any documented band.
 - The `needs_decisions` label is the valuable one: it catches the spec that defers
   something the implementer cannot defer.
 - This is `human_review: required`. `to-spec` ends with the user approving the spec; this

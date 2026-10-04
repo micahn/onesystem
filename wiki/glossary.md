@@ -15,18 +15,27 @@ status: current
 Terms used in this wiki, and the words this wiki borrows from elsewhere. Where a term
 belongs to another project, that project owns the definition and this is a pointer.
 
-## The shared vocabulary
+## rizzo's vocabulary, and the ones that are shared
 
-These are the ones that mean the same thing on all three engines.
+These are the terms this vault uses. The three question types are shared vocabulary across
+every engine; everything else here is either rizzo's or onesystem's. Terms that belong to
+another engine appear under **Borrowed from laya**, further down, and are marked.
 
 **Typed question** — one of three kinds: `choice`, `score`, `noul`. The only kind of
 question any of these engines accepts. If you cannot phrase it as one of the three, you do
 not have a decision yet.
 
-**State** — what the question is asked *about*. Text, or a JSON object, and **which one is
-a hard requirement per engine**: laya requires an object, julia requires a string, rizzo
-takes either. See [compatibility](reference/compatibility.md). The quality of the state is
-the quality of the answer.
+**State** — what the question is asked *about*. rizzo takes either text or a JSON object,
+so nothing forces a choice here. (laya requires an object and julia requires a string, which
+matters only if you enable a second engine — see [compatibility](reference/compatibility.md).)
+The quality of the state is the quality of the answer.
+
+**Option score** — what rizzo calls its numbers, in `probability_status`. Not a calibrated
+probability, despite the field name. A ranking over the options you defined. See
+[answer payload](reference/answer-payload.md).
+
+**Probability status** — rizzo's own disclaimer, on every response:
+`["uncalibrated_conditional_option_scores"]`. Read it before quoting any number it returns.
 
 **Instruction** — the sentence inside a question saying what is being asked. It is rendered
 into the model's input, so it is part of the question's meaning and not metadata. A vague
@@ -46,9 +55,9 @@ call shares one, which is why five related questions cost about what one costs.
 **Probability** — what comes back instead of text. Read the distribution, not just the
 argmax: two cases returning the same label are not the same case.
 
-**Act probability** — a field on laya's answers that is `1.0` on every answer ever returned
-and carries no information. Not a confidence. See
-[guardrails](reference/guardrails.md).
+**Act probability** — a field on *laya's* answers that is `1.0` on every answer ever
+returned and carries no information. Not a confidence. rizzo has no such field. See
+[guardrails](reference/guardrails.md#a-laya-only-trap-in-case-you-enable-laya).
 
 ## onesystem's vocabulary
 
@@ -100,8 +109,9 @@ or argued out and the reason is recorded. Only the last two carry evidence.
 
 ## Borrowed from laya
 
-laya's vocabulary is richer than the shared surface, and these terms appear in notes scoped
-to it. laya owns all of them; the pointers are in [the models page](reference/models.md).
+laya's vocabulary is richer than the one-tool surface, and these terms appear only in notes
+scoped to it — the ones whose frontmatter reads `engines: [laya]`. laya owns all of them; the
+pointers are in [the models page](reference/models.md).
 
 **Checkpoint** — a loaded encoder plus decision head. Which one is resident is laya's
 choice, not yours.

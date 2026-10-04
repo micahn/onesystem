@@ -4,7 +4,7 @@ title: Does the claim hold up
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice]
 status: candidate

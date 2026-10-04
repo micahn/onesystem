@@ -4,7 +4,7 @@ title: Gate a ticket before implementing
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice, noul]
 status: proven
@@ -76,7 +76,8 @@ confident *negative* scores high. Do not read that as inconsistency.
 - **`state` is the whole game.** A ticket body that omits the acceptance criteria will
   come back `needs_criteria` for the right reason and the wrong reason. Include the
   criteria in `state` if you want them judged.
-- `risk` is a `score` with 4 levels, inside the calibrated `score:3-5` band. Good.
+- `risk` is a `score` with 4 levels. Three to five is the range laya documents; rizzo
+  publishes no limit of its own.
 - Read `probabilities`, not just `choice`. If `ready` and `needs_scope` are within 0.1,
   the ticket is genuinely ambiguous and a human should look.
 

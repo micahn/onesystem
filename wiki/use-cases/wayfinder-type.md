@@ -4,7 +4,7 @@ title: Which wayfinder type
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice]
 status: candidate
@@ -50,7 +50,7 @@ tags: [use-case, wayfinder]
 
 ## Caveats
 
-- Four labels, calibrated. The glosses are what make this work — "the answer only appears
+- Four labels. The glosses are what make this work — "the answer only appears
   once something tangible is built" is the whole distinction between `prototype` and
   `grilling`, and a lazy gloss loses it.
 - `is_precedence_decision` catches a real failure mode: a "decision" that was settled by

@@ -22,7 +22,8 @@ Feature
 Envy'), never a hard violation"*. That is a ready-made `choice` criteria set, and
 `codebase-design` shares the vocabulary.
 
-Twelve labels is past the documented `choice:11+` calibrated band, so this note carries
+Twelve labels is past the `choice:11+` band laya documents and warns about (rizzo
+publishes no such limit), so this note carries
 that caveat. See [reference/guardrails](../reference/guardrails.md#the-`choice:11+`-temperature-clamp) — and note
 that the label count is *not* the thing most likely to make this question weak. A vague
 `state` is. See [patterns/ranking-with-shortlist](../patterns/ranking-with-shortlist.md).
@@ -70,7 +71,7 @@ that the label count is *not* the thing most likely to make this question weak. 
 - The `is_judgement_call` `noul` is always `true` by the skill's own definition — the value
   is in forcing the distinction to be *stated* per finding, which pairs with
   [use-cases/review-finding-kind](review-finding-kind.md).
-- 13 labels is past the documented calibration boundary, but I would **not** split it just
+- 13 labels is past the boundary laya documents, but I would **not** split it just
   to get under 10. Measured: 34 labels beat a hand-picked 10 on the same input, because
   specific glosses discriminate better than a small set of vague ones. Splitting helps
   latency and token budget, and costs accuracy when the coarse glosses are thin. If you

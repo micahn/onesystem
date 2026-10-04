@@ -48,14 +48,13 @@ Every note in `use-cases/`, `patterns/` and `reference/` carries this. Fields ma
 
 This is the field that keeps a laya-only pattern from being read as a portable one.
 
-`[laya, rizzo]` means the payload runs as written on those engines. `julia` is absent
-because it needs `state` flattened to a string — a real porting step, documented rather than
-hidden. `[laya]` alone means the note depends on a tool only laya has, and the comment line
-above the field says which.
+`[rizzo]` is the normal value and means the payload runs as written on the engine this
+machine has. `[laya]` alone means the note depends on a tool only laya has — `laya_route`,
+`laya_preset` — and the comment line above the field says which. Those notes do not run here.
 
-The values are a claim, and it is checkable: the matrix in
-[What a model has to provide](../reference/compatibility.md) is measured, and
-`scripts/compat.ts` in the comparison harness regenerates it.
+The value is a claim and it is checked: `scripts/run-payloads.py` executes every payload in
+`use-cases/` against rizzo and fails if any is rejected, and
+`scripts/verify-claims.py` checks the documented engine facts against a running onesystem.
 
 ### `human_review`
 

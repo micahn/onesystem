@@ -4,7 +4,7 @@ title: Bug or enhancement
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice]
 status: candidate
@@ -50,7 +50,7 @@ The second label every triaged issue needs. `triage` L27-29 defines `bug` and
 
 ## Caveats
 
-- Four labels, comfortably calibrated. `question` and `support` are the ones people forget,
+- Four labels. `question` and `support` are the ones people forget,
   and they are exactly the ones that get filed as bugs.
 - `is_regression` is more useful than it looks: regressions are cheap to confirm and
   expensive to mis-file, and it is a clean yes/no.

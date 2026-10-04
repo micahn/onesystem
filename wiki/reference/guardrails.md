@@ -43,9 +43,16 @@ high band is better than its base rate, so a threshold *appears* to work. But sk
 check on a band that is right 56% of the time automates the error rather than avoiding it.
 A gate has to be trustworthy in absolute terms, not merely better than nothing.
 
-**So the doctrine is now per-engine:** rizzo's confidence is a routing signal, and laya's
-and julia's are not. Do not carry a threshold across engines — it means something different
-on each, and on two of them it means nothing.
+**And note what rizzo says about itself**, on every response:
+`probability_status: ["uncalibrated_conditional_option_scores"]`. These are option scores,
+not frequencies, so `0.98` does not mean "98% likely to be right". The measured 52/52 is
+evidence that the *ordering* separates; it is not a claim that the magnitudes are
+frequencies. 52 cases of one corpus is a reason to try a threshold on your own questions,
+not a guarantee.
+
+**So the doctrine is per-engine:** rizzo's confidence is worth ranking by, and laya's and
+julia's are not. Do not carry a threshold across engines — it means something different on
+each, and on two of them it means nothing.
 
 ## 3. A confident wrong answer is worse than an uncertain one
 

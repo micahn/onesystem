@@ -4,7 +4,7 @@ title: Which flow at a boundary
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice]
 status: candidate
@@ -73,7 +73,7 @@ Build the criteria from the skills you are actually choosing between:
 
 ## Caveats
 
-- **Ten labels, at the edge of the documented calibrated band.** See
+- **Ten labels**, at the edge of the band laya documents. See
   [reference/guardrails](../reference/guardrails.md#the-`choice:11+`-temperature-clamp). Keep the list to the flows
   actually installed, because each gloss is doing discrimination work and a padded list
   dilutes it. If it grows past ~20, split by family — planning versus building versus

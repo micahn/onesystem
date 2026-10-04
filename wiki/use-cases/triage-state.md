@@ -4,7 +4,7 @@ title: Which triage state
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice]
 status: candidate
@@ -61,7 +61,7 @@ The vocabulary below is lifted verbatim from
 
 ## Caveats
 
-- **Five labels, comfortably inside the documented calibrated band.** If your repo's
+- **Five labels.** If your repo's
   `triage-labels.md` has more roles you go past it, which Laya warns about at load — see
   [reference/guardrails](../reference/guardrails.md#the-`choice:11+`-temperature-clamp). In practice that is a soft
   concern: 34 labels measured *better* than a hand-picked 10 on a well-written `state`.

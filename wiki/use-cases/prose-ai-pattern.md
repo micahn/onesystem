@@ -4,7 +4,7 @@ title: Which AI-writing pattern
 kind: use-case
 surface: [mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
+# Portable as written: an object state. julia needs it flattened to a string.
 engines: [laya, rizzo]
 question_types: [choice, score]
 status: candidate
@@ -64,7 +64,7 @@ Ask per line, not per document — the patterns are line-level:
 - **`none` is a required label.** The skill's own false-positive section exists because
   these patterns over-fire. A six-label question with a real `none` beats a five-label
   question that must pick.
-- **Six groups, not 35 patterns.** Thirty-five labels is far past the calibrated band and
+- **Six groups, not 35 patterns.** Thirty-five labels is unreadable and
   past the point where the model can hold the distinctions. Ask the group first; only go
   finer if you actually need per-pattern attribution, and then split into batches.
 - `keeps_claim` is the constraint the skill leads with — *"keep every claim, invent no

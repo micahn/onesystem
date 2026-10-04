@@ -63,6 +63,30 @@ unsure. Those want a better `state`, not a retry.
 
 ## The four divergences, and what to do about each
 
+### 0. rizzo disclaims its own numbers, and you should believe it
+
+Every rizzo response carries this, on every question type, without exception:
+
+```jsonc
+"x_rizzo": { "probability_status": ["uncalibrated_conditional_option_scores"] }
+```
+
+Read it as the model's own statement: these are **conditional option scores, not
+calibrated probabilities**. `0.98` does not mean "98% likely to be right".
+
+This is worth stating first because the natural reading of a field called `confidence` is
+the opposite, and because "calibrated classifier" is the phrase every description of this
+kind of engine reaches for. An earlier draft of this wiki asserted it before anyone had read
+that field.
+
+laya and julia do not publish an equivalent disclaimer, which is not the same as being
+calibrated — see [Guardrails](guardrails.md) for what was measured, which is a separate
+question from what a model claims about itself.
+
+One more field to distrust on rizzo: `timing.peak_device_bytes` reads `0` on most calls and a
+real figure on some. It is not a reliable per-call measurement; `GET /health` is the place
+for VRAM.
+
 ### 1. `noul` does not declare its polarity
 
 `noul` is a bare probability and nothing says which way it points. This page reads it as

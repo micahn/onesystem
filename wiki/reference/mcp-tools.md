@@ -100,6 +100,19 @@ getting it wrong at either layer produces a null that reads like a model failure
 `isError: true` and a plain-text validation message, not as a JSON-RPC error. See
 [compatibility](compatibility.md#a-refusal-is-not-a-json-rpc-error).
 
+## Every tool returns a JSON string
+
+Whichever engine answers, the tool resolves to a **string** — that is what the plugin hands
+back, so it is a property of the bridge and not of any model.
+
+```javascript
+const answer = JSON.parse(await tools.predict({ state, questions }));  // required
+```
+
+Read `.answers` off the raw result and you get `undefined`, which reads like a dead engine.
+This is the single most common reason a first attempt gets abandoned, and it has nothing to
+do with the model.
+
 ## The HTTP front door
 
 Simpler than MCP when you are writing a script, and it does not care how many engines are
