@@ -4,8 +4,8 @@ title: Multi-question batches and hierarchical labels
 kind: pattern
 surface: [mcp, http, http]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
-engines: [laya, rizzo]
+# Portable as written: an object state. julia needs it flattened to a string.
+engines: [rizzo]
 question_types: [choice, score, noul]
 tags: [pattern, batching, performance, calibration]
 status: current
@@ -48,7 +48,7 @@ it is why a very large taxonomy is worth splitting.
 ## Hierarchical labels: the theory, and what actually happened
 
 Splitting a taxonomy into stages looks obviously right: fewer labels per question, each in
-the documented calibrated band, all in one forward pass.
+the range laya documents, all in one forward pass.
 
 ```json
 {

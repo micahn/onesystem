@@ -116,12 +116,12 @@ cluster to adopt.
 ## Filters
 
 The `human_review: none` cases, where a false positive is cheap and a false negative is
-not. `pre-push-secret-guard` and `untrusted-content-injection` are content filters;
+not. `untrusted-content-injection` is a content filter;
 `checkpoint-route-explain` is free and factual.
 
 | Use case | Review | Risk | Status |
 |---|---|---|---|
-| [use-cases/pre-push-secret-guard](pre-push-secret-guard.md) | none | **high** | **proven** |
+| [use-cases/pre-push-secret-triage](pre-push-secret-triage.md) | optional | medium | **proven** |
 | [use-cases/untrusted-content-injection](untrusted-content-injection.md) | none | **high** | **proven** |
 
 ## Meta
@@ -137,7 +137,7 @@ These have measured numbers in their notes:
 
 - **[use-cases/ticket-gate](ticket-gate.md)** — `ready` 0.8128, confidence 0.4438. Already written into
   `~/Projects/breath/AGENTS.md` rule 6.
-- **[use-cases/pre-push-secret-guard](pre-push-secret-guard.md)** — `sensitive_data` 0.79 on a secret diff vs
+- **[use-cases/pre-push-secret-triage](pre-push-secret-triage.md)** — ranks a diff; measured `precision@10` of 10/10
   0.13 on a clean one. Strongest signal in the wiki.
 - **[use-cases/checkpoint-route-explain](checkpoint-route-explain.md)** — no forward pass, milliseconds, offline.
 
@@ -153,7 +153,7 @@ These have measured numbers in their notes:
 
 | Status | Meaning |
 |---|---|
-| `proven` | Measured on this machine, with the numbers in the note. |
+| `proven` | Measured, with the numbers in the note. |
 | `candidate` | Designed and payload written, not yet run against real data. |
 | `rejected` | Tried and did not work, or argued out on principle. The reason is in the note under **Verdict**. |
 | `reference` | Describes Laya rather than proposing a use for it. |

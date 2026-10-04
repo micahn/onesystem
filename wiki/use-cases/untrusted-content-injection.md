@@ -86,5 +86,5 @@ reasonable line; 0.1 would be too low.**
 
 ## See also
 
-[use-cases/pre-push-secret-guard](pre-push-secret-guard.md) · [use-cases/research-claim-primary-source](research-claim-primary-source.md) ·
+[use-cases/pre-push-secret-triage](pre-push-secret-triage.md) · [use-cases/research-claim-primary-source](research-claim-primary-source.md) ·
 [the models page](../reference/models.md), for what laya's own guardrail classes are called

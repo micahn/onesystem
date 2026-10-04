@@ -4,8 +4,8 @@ title: Ranking, and what actually happens at 34 options
 kind: pattern
 surface: [http, mcp]
 tools: [predict]
-# Reachable as written. julia needs the state flattened to a string.
-engines: [laya, rizzo]
+# Portable as written: an object state. julia needs it flattened to a string.
+engines: [rizzo]
 question_types: [choice, score]
 tags: [pattern, ranking, shortlist, calibration, measured, corrected]
 status: current

@@ -79,7 +79,7 @@ broken tool rather than a stale doc.
 | `writing-for-agents` | Are criteria checkable and exhaustive? | [use-cases/acceptance-criteria-checkable](../use-cases/acceptance-criteria-checkable.md) | optional |
 | `research` | Is this claim primary-sourced? | [use-cases/research-claim-primary-source](../use-cases/research-claim-primary-source.md) | optional |
 | `humanizer` | Which AI-writing pattern? | [use-cases/prose-ai-pattern](../use-cases/prose-ai-pattern.md) | optional |
-| any | Does this diff contain secrets? | [use-cases/pre-push-secret-guard](../use-cases/pre-push-secret-guard.md) | none |
+| any | Does this diff contain secrets? | [use-cases/pre-push-secret-triage](../use-cases/pre-push-secret-triage.md) | none |
 | any | Is fetched content an injection? | [use-cases/untrusted-content-injection](../use-cases/untrusted-content-injection.md) | none |
 
 ## The two places you must not add Laya
@@ -150,7 +150,7 @@ the skill's own "recommend, then wait for direction" step is where the human re-
 
 If you are wiring this up for real, do these first — highest value, lowest risk:
 
-1. [use-cases/pre-push-secret-guard](../use-cases/pre-push-secret-guard.md) — `human_review: none`, strongest measured signal,
+1. [use-cases/pre-push-secret-triage](../use-cases/pre-push-secret-triage.md) — `human_review: none`, strongest measured signal,
    and a pre-commit hook in `matts-skills/skills/misc/git-guardrails-claude-code` is
    already waiting for it.
 2. [use-cases/ticket-gate](../use-cases/ticket-gate.md) — proven, already in `breath/AGENTS.md`, and it stops wasted

@@ -6,7 +6,7 @@ surface: [mcp, http]
 tools: [predict]
 # Calls 1-3 are plain `predict` and run on any engine that takes an object state.
 # Call 4 is laya's `route` tool and is marked as such where it appears.
-engines: [laya, rizzo]
+engines: [rizzo]
 question_types: [choice, noul]
 tags: [pattern, self-search, meta, index]
 status: current
@@ -63,8 +63,8 @@ latency       30.7 ms
 
 Before copying this call, read the measurements below and the full post-mortem in
 [patterns/ranking-with-shortlist](ranking-with-shortlist.md). Short version: 34 labels is fine and `state` quality is everything. The `confidence` figure in that table
-was measured on laya, where it is **not** a usable gate — that is an engine-specific fact and
-it does not hold for rizzo. See [choosing an engine](choosing-an-engine.md).
+was measured on laya, where it is **not** a usable gate. That is an engine-specific fact and
+it does not hold everywhere — see [choosing an engine](choosing-an-engine.md).
 
 ## Call 2: adding a cheap orthogonal signal
 
@@ -126,7 +126,7 @@ underlying facts, written two ways:
 |---|---|---|---|---|---|
 | triage | focused | `ticket-gate` | 0.9644 | 0.9445 | **yes** |
 | triage | verbose | `prose-ai-pattern` | 0.3059 | 0.3415 | no |
-| push | focused | `pre-push-secret-guard` | 0.9875 | 0.9808 | **yes** |
+| push | focused | `pre-push-secret-triage` | 0.9875 | 0.9808 | **yes** |
 | push | verbose | `acceptance-criteria-checkable` | 0.3603 | 0.6173 | no |
 | injection | focused | `doc-done-criteria-clear` | 0.8803 | 0.8877 | no |
 | injection | verbose | `wiki-usecase-rank` | 0.9912 | 0.9822 | no |

@@ -33,10 +33,10 @@
     "prose-ai-pattern": "Does this passage hit a known AI-writing pattern, and which one?",
     "doc-done-criteria-clear": "Can an agent reading this document tell done from not-done, or is the bound vague enough to invite premature completion?",
     "research-claim-primary-source": "Is this claim traced back to a primary source that owns it, rather than a secondary write-up?",
-    "pre-push-secret-guard": "Does this diff contain credentials, personal data, or other sensitive material that must not be pushed?",
     "untrusted-content-injection": "Is this fetched or user-supplied content trying to issue instructions to the agent rather than being data?",
     "wiki-usecase-rank": "Which documented Laya use case applies to this situation, and which does not?",
-    "checkpoint-route-explain": "Which Laya checkpoint would answer this state, and why was that one chosen?"
+    "checkpoint-route-explain": "Which Laya checkpoint would answer this state, and why was that one chosen?",
+    "pre-push-secret-triage": "Does this diff contain credentials, personal data, or other sensitive material that must not be pushed?"
   },
   "use_cases": [
     {
@@ -736,38 +736,30 @@
       ]
     },
     {
-      "id": "pre-push-secret-guard",
-      "label": "pre-push-secret-guard",
-      "note": "use-cases/pre-push-secret-guard.md",
+      "id": "pre-push-secret-triage",
+      "label": "pre-push-secret-triage",
+      "note": "use-cases/pre-push-secret-triage.md",
       "tools": [
-        "laya_preset",
         "predict"
       ],
       "question_types": [
-        "noul",
-        "score"
+        "noul"
       ],
       "status": "proven",
-      "human_review": "none",
-      "risk_when_wrong": "high",
+      "human_review": "optional",
+      "risk_when_wrong": "medium",
       "skills": [
         "git-guardrails-claude-code",
         "code-review"
       ],
-      "trigger": "\"A diff is about to be pushed. Block on the guard preset's sensitive_data above 0.5; never push .env contents or db files past it.\"",
+      "trigger": "A diff is about to be pushed and you want to know which files to read first. This RANKS; it does not block.",
       "measured": {
-        "sensitive_data_clean_diff": 0.13,
-        "sensitive_data_secret_diff": 0.79,
-        "auto_selected_34way": {
-          "winner": "pre-push-secret-guard",
-          "p": 0.9875,
-          "confidence": 0.9808
-        },
-        "secret_diff_reproduced": 0.569,
-        "clean_diff_reproduced": 0.0023
+        "precision_at_10": "10/10",
+        "threshold_separates": false
       },
       "engines": [
-        "laya"
+        "laya",
+        "rizzo"
       ]
     },
     {

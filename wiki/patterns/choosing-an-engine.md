@@ -1,26 +1,29 @@
 ---
 id: choosing-an-engine
-title: Choosing an engine
+title: If you add a second engine
 kind: pattern
 surface: [cli, http, mcp]
 tools: [predict]
-engines: [julia, laya, rizzo]
+engines: [rizzo]
 question_types: [choice, score, noul]
 status: reference
 tags: [pattern, selection, calibration, latency]
 measured_at: "2026-09-29, 100 cases across three corpora, RX 9070 XT"
 ---
 
-# Choosing an engine
+# If you add a second engine
 
 onesystem fronts three engines that answer the same three question types over the same
 `{state, questions}` payload. They are not interchangeable, and the differences that matter
 are not the ones a feature list would lead you to expect.
 
-This page is the decision. The measurements are in
-[the comparison writeup](https://micahn.github.io/onesystem-ab/); the requirements that
-make the choice possible at all are in
-[What a model has to provide](../reference/compatibility.md).
+**This page matters only if you are choosing.** If one engine is already installed and
+answering, [what a model has to provide](../reference/compatibility.md) is the page to read --
+it says whether what you have qualifies, and what it cannot do.
+
+The measurements are in [the comparison writeup](https://micahn.github.io/onesystem-ab/);
+the requirements any engine has to meet are in
+[what a model has to provide](../reference/compatibility.md).
 
 ## What kind of engine you are choosing between
 
@@ -62,7 +65,7 @@ different models. rizzo's accuracy barely moves.
 
 ## The decision
 
-**Default to rizzo.** It is the only one whose confidence is usable, and that is the whole
+**Default to rizzo** when you have the choice. It is the only one whose confidence is usable, and that is the whole
 argument. Its high-confidence band was 52 of 52 correct, it reports confidence as low as
 0.05 so there is a real tail to escalate, and its accuracy is stable across domains. That
 pair of facts is what makes a two-tier design worth building rather than merely tidy.

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Check the wiki's factual claims against the running system.
+Check this vault's claims against the running system.
 
-The wiki asserts things about the three engines -- which tool names exist, which `state`
-shapes are accepted, what a refusal looks like. Those are all checkable against a live
-onesystem, and a wiki that documents a contract nobody verifies is how a wiki goes stale
-quietly.
+The vault documents a contract, and a documented contract that nobody verifies is how a
+wiki goes stale quietly. Every assertion below is one the vault makes in prose, so a model
+upgrade that breaks one shows up as a failing check rather than as a wrong answer months
+later.
 
     onesystem start
     python3 scripts/verify-claims.py
 
-Exits non-zero on a mismatch. Reads the vault, so it fails if the documentation and the
-system disagree -- which is the whole point.
+Exits non-zero on a mismatch. It reads the vault's own text for the claims it can check
+against documentation, and asks the live system for the rest.
 """
 
 import json
@@ -23,6 +23,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASE = "http://127.0.0.1:7331"
+ENGINE = "rizzo"
 
 failures: list[str] = []
 checked = 0
@@ -40,143 +41,115 @@ def get(path: str) -> dict:
         return json.loads(response.read().decode())
 
 
-def call(backend: str, tool: str, arguments: dict) -> tuple[bool, str]:
-    """POST /call, returning (ok, text). `text` is the answer or the error message."""
-    body = json.dumps({"backend": backend, "tool": tool, "arguments": arguments}).encode()
-    request = urllib.request.Request(
-        f"{BASE}/call",
-        data=body,
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
+def call(backend: str, state: object, questions: object) -> dict:
+    body = json.dumps({"backend": backend, "tool": "predict", "arguments": {"state": state, "questions": questions}}).encode()
+    request = urllib.request.Request(f"{BASE}/call", data=body, headers={"content-type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=300) as response:
         envelope = json.loads(response.read().decode())
-    return True, str(envelope.get("result", {}).get("content", [{}])[0].get("text", ""))
+    text = envelope.get("result", {}).get("content", [{}])[0].get("text", "")
+    if envelope.get("result", {}).get("isError"):
+        raise RuntimeError(text)
+    return json.loads(text)
 
 
-# --- what the vault claims -----------------------------------------------------
-
-vault_text = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.md"))
-
-# --- the service is up ---------------------------------------------------------
+SITUATION = "Checkout returns 503 for ~4% of requests since the connection pool was capped at 5. p99 went 40ms to 2.1s."
+CHOICE = {"probe": {"type": "choice", "instructions": "What is the proximate cause?",
+                   "criteria": {"pool": "The pool is saturated at its cap.", "upstream": "The upstream is degraded."}}}
+NOUL = {"probe": {"type": "noul", "instructions": "Does this need a rollback?",
+                  "criteria": {"false": "No, a forward fix.", "true": "Yes, roll back."}}}
+SCORE = {"probe": {"type": "score", "instructions": "How severe is this?",
+                   "criteria": ["Minor and self-clearing.", "Degraded but usable.", "Partial outage."]}}
 
 try:
     health = get("/health")
+    catalog = get("/catalog")
 except (urllib.error.URLError, OSError) as exc:
     print(f"no onesystem answering on {BASE} ({exc}). Start one: `onesystem start`")
     sys.exit(1)
 
-catalog = get("/catalog")
-by_backend = {b["backend"]: b for b in catalog["backends"]}
 enabled = [b["name"] for b in health["backends"]]
+by_backend = {b["backend"]: b for b in catalog["backends"]}
 
-# --- claim: every enabled engine publishes `predict` ---------------------------
+# --- who is enabled ---------------------------------------------------------------
 
-for name in enabled:
-    tools = {t["name"] for t in by_backend.get(name, {}).get("tools", {}).get("tools", [])}
-    check("predict" in tools or any(t.endswith("predict") for t in tools),
-          f"{name} is enabled but publishes no `predict` tool; the wiki's portable surface assumes one")
+check(ENGINE in enabled, f"{ENGINE} is not enabled; the vault is written for it")
+check(enabled == [ENGINE],
+      f"the vault says only {ENGINE} is enabled, but the config has {enabled}. "
+      "The bare tool name in every payload depends on this.")
+check(bool(by_backend.get(ENGINE, {}).get("tools", {}).get("tools")),
+      f"{ENGINE} publishes no tools in the catalog")
 
-# --- claim: laya needs an object, julia needs a string, rizzo takes either -----
+# --- state shapes -----------------------------------------------------------------
 
-SITUATION = "A payments endpoint began returning 503 for 4% of requests after the pool cap was lowered to 5."
-QUESTION = {
-    "probe": {
-        "type": "choice",
-        "instructions": "What is the proximate cause?",
-        "criteria": {"pool": "The pool is saturated at its cap.", "upstream": "The upstream is degraded."},
-    }
-}
+for label, state, should_work in (
+    ("object", {"situation": SITUATION}, True),
+    ("string", SITUATION, True),
+):
+    try:
+        call(ENGINE, state, CHOICE)
+        worked = True
+        detail = "answered"
+    except Exception as exc:  # noqa: BLE001 -- the message is the assertion
+        worked = False
+        detail = str(exc)[:120]
+    check(worked == should_work,
+          f"the vault says {ENGINE} accepts state as a {label}; live result: {detail}")
 
-for backend, accepts_object, accepts_string in (("laya", True, False), ("julia", False, True), ("rizzo", True, True)):
-    if backend not in enabled:
-        continue
-    for shape, state, should_work in (
-        ("object", {"situation": SITUATION}, accepts_object),
-        ("string", SITUATION, accepts_string),
-    ):
-        ok, text = call(backend, "predict", {"state": state, "questions": QUESTION})
-        answered = ok and text.strip().startswith("{") and "answers" in text
-        check(answered == should_work,
-              f"{backend} with state as {shape}: expected "
-              f"{'acceptance' if should_work else 'refusal'}, got {'an answer' if answered else text[:90]!r}")
+# --- the three question types ------------------------------------------------------
 
-# --- claim: score takes an ordered array, not an object ------------------------
+for name, questions in (("choice", CHOICE), ("noul", NOUL), ("score", SCORE)):
+    try:
+        answer = call(ENGINE, {"situation": SITUATION}, questions)
+        check("probe" in answer.get("answers", {}), f"{name} returned no answer for the probe")
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"the vault says {ENGINE} answers `noul`/`score`/`choice`; {name} failed: {str(exc)[:120]}")
 
-if "laya" in enabled:
-    ok, text = call("laya", "predict", {
-        "state": {"situation": SITUATION},
-        "questions": {"probe": {"type": "score", "instructions": "How severe?",
-                                "criteria": {"low": "Minor.", "high": "Major."}}},
-    })
-    check(not (ok and '"answers"' in text and "probe" in text and "legend" in text),
-          "laya accepted an object for score criteria; the wiki says it wants an ordered array")
+# --- score wants an array ----------------------------------------------------------
 
-# --- claim: a refusal is isError with plain text, not a JSON-RPC error ---------
+try:
+    call(ENGINE, {"situation": SITUATION},
+         {"probe": {"type": "score", "instructions": "How severe?",
+                    "criteria": {"low": "Minor.", "high": "Major."}}})
+    check(False, "an object was accepted for score criteria; the vault says it must be an ordered array")
+except Exception:
+    check(True, "")
 
-if "laya" in enabled:
-    import http.client
+# --- what rizzo says about its own numbers ----------------------------------------
 
-    conn_headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
-    init = urllib.request.Request(
-        f"{BASE}/mcp/laya",
-        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                         "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                                    "clientInfo": {"name": "verify", "version": "1"}}}).encode(),
-        headers=conn_headers, method="POST")
-    with urllib.request.urlopen(init, timeout=120) as response:
-        sid = response.headers.get("mcp-session-id")
-        response.read()
-    check(bool(sid), "laya's MCP endpoint returned no session id")
+try:
+    answer = call(ENGINE, {"situation": SITUATION}, CHOICE)
+    status = answer.get("x_rizzo", {}).get("probability_status")
+    check(status == ["uncalibrated_conditional_option_scores"],
+          f"probability_status is {status!r}; the vault tells readers the numbers are "
+          "uncalibrated option scores, and that has to stay true or the caveat is a lie")
 
-    if sid:
-        urllib.request.urlopen(urllib.request.Request(
-            f"{BASE}/mcp/laya",
-            data=json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode(),
-            headers={**conn_headers, "mcp-session-id": sid}, method="POST"), timeout=120).read()
-        bad = urllib.request.Request(
-            f"{BASE}/mcp/laya",
-            data=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                             "params": {"name": "predict",
-                                        "arguments": {"state": "a bare string", "questions": QUESTION}}}).encode(),
-            headers={**conn_headers, "mcp-session-id": sid}, method="POST")
-        with urllib.request.urlopen(bad, timeout=120) as response:
-            frame = response.read().decode()
-            status = response.status
-        envelope = json.loads(re.search(r"^data: (.*)$", frame, re.M).group(1))
-        check(status == 200, f"a shape refusal returned HTTP {status}, not 200; the wiki says 200 + isError")
-        check("error" not in envelope, "a shape refusal came back as a JSON-RPC error, not isError")
-        check(bool(envelope.get("result", {}).get("isError")),
-              "a shape refusal did not set isError; the wiki says check isError before parsing")
-        text_block = str(envelope.get("result", {}).get("content", [{}])[0].get("text", ""))
-        check(not text_block.strip().startswith("{"),
-              "a refusal's content text parsed as JSON; the wiki says it is plain text")
-        check("state" in text_block, "the refusal message does not name the offending field")
+    # laya's trap, and rizzo's immunity to it.
+    entry = answer.get("answers", {}).get("probe", {})
+    check("action" not in entry,
+          "a rizzo answer now carries an `action` block; the vault says rizzo has no "
+          "act_probability placeholder, so the laya-only note needs revisiting")
+except Exception as exc:  # noqa: BLE001
+    check(False, f"could not read the rizzo payload: {str(exc)[:120]}")
 
-# --- claim: the compatibility page's matrix matches reality ---------------------
+# --- score is a position, not an index ---------------------------------------------
 
-compat = ROOT / "reference" / "compatibility.md"
-if compat.exists():
-    body = compat.read_text(encoding="utf-8")
-    for backend, shape, word in (("laya", "string", "refused"), ("julia", "object", "refused")):
-        row = re.search(rf"\|\s*\*\*{backend}\*\*\s*\|([^|]*)\|([^|]*)\|", body)
-        if row and backend in enabled:
-            cell = row.group(1) if shape == "object" else row.group(2)
-            check(word in cell.lower(),
-                  f"compatibility.md says {backend} {word} a {shape} state, but the live system disagrees")
+try:
+    answer = call(ENGINE, {"situation": SITUATION}, SCORE)
+    entry = answer["answers"]["probe"]
+    check(isinstance(entry.get("probabilities"), dict) and isinstance(entry.get("legend"), dict),
+          "a score answer no longer carries probabilities and legend; the vault tells readers "
+          "to score by the argmax of probabilities, so that instruction is now wrong")
+except Exception as exc:  # noqa: BLE001
+    check(False, f"could not read the score payload: {str(exc)[:120]}")
 
-# --- claim: `act_probability` really is a constant 1.0 -------------------------
+# --- the vault's own text agrees with the system -----------------------------------
 
-if "laya" in enabled:
-    ok, text = call("laya", "predict", {"state": {"situation": SITUATION}, "questions": QUESTION})
-    if ok and text.strip().startswith("{"):
-        entry = json.loads(text)["answers"]["probe"]
-        if "action" in entry:
-            check(entry["action"].get("act_probability") == 1.0,
-                  f"act_probability is {entry['action'].get('act_probability')!r}, not 1.0; "
-                  "the wiki's claim that it is a constant placeholder needs revisiting")
-
-# --- report --------------------------------------------------------------------
+home = (ROOT / "Home.md").read_text(encoding="utf-8")
+check("JSON.parse" in home,
+      "Home.md does not mention JSON.parse; the tool returns a string and that is the most "
+      "likely reason a first attempt looks like a failure")
+check("uncalibrated" in home or "uncalibrated" in (ROOT / "reference" / "answer-payload.md").read_text(encoding="utf-8"),
+      "no page records rizzo's probability_status disclaimer")
 
 for f in failures:
     print(f"  MISMATCH {f}")
