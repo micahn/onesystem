@@ -128,6 +128,21 @@ async function readHolder(path: string): Promise<Holder> {
   return { pid, state: alive ? "held" : "stale", alive, port, path }
 }
 
+/**
+ * True when a live holder recorded a port that no longer answers.
+ *
+ * `record(port)` is written only after `listen()` succeeds, so a recorded port that refuses
+ * a connection means the listener was closed while the process lived on: the daemon is
+ * shutting down, or its shutdown hung. Both are safe to reclaim - a releasing daemon only
+ * unlinks a lock that still names it, so a successor is never dropped.
+ */
+async function aliveButNotServing(holder: Holder): Promise<boolean> {
+  if (holder.port === null) return false
+  if (await servingOn(holder.port)) return false
+  log.warn("holder is alive but not serving; reclaiming", { path: holder.path, pid: holder.pid, port: holder.port })
+  return true
+}
+
 /** Acquire or report the holder. Retry when processes race to reclaim a stale lock. */
 export async function acquire(path: string, info: Record<string, unknown> = {}): Promise<Lease> {
   await mkdir(dirname(path), { recursive: true })
@@ -188,7 +203,12 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
 
       const holder = await readHolder(path)
 
-      if (holder.state === "held") throw new LockBusy(holder)
+      // A live pid is not proof of a serving daemon. A shutdown that hung after closing its
+      // listener leaves a live process holding a lock with nothing behind it, and a live pid
+      // alone is enough to refuse every later start - so the recorded port is what has to
+      // decide. A TCP probe survives a busy event loop (the kernel completes the connect), so
+      // a refused connection means the listener is closed, not that the daemon is slow.
+      if (holder.state === "held" && !(await aliveButNotServing(holder))) throw new LockBusy(holder)
 
       if (holder.state === "unknown") {
         // Someone is mid-create. Short wait, then re-read so the eventual LockBusy
@@ -204,7 +224,7 @@ export async function acquire(path: string, info: Record<string, unknown> = {}):
         throw new LockBusy(holder)
       }
 
-      log.warn("reclaiming stale lock", { path, pid: holder.pid, holderState: holder.state })
+      log.warn("reclaiming lock", { path, pid: holder.pid, holderState: holder.state })
       try {
         await unlink(path)
       } catch {

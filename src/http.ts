@@ -30,7 +30,7 @@ import { healthReport } from "./health.ts"
 import { run } from "./subprocess.ts"
 import { attribute, VramReader } from "./vram.ts"
 import { modelFor } from "./models.ts"
-import { describeError } from "./async.ts"
+import { describeError, withTimeout } from "./async.ts"
 import { logger } from "./log.ts"
 import { VERSION } from "./version.ts"
 
@@ -38,6 +38,13 @@ const log = logger("http")
 
 /** Request bodies larger than this are refused rather than buffered. */
 const MAX_BODY_BYTES = 8 * 1024 * 1024
+
+/**
+ * Grace for in-flight work before a shutdown stops waiting for it. An unfinished response -
+ * a connection carrying a request that never ends - keeps `server.close()` pending forever,
+ * and a shutdown that waits on it never releases the lock.
+ */
+const CLOSE_GRACE_MS = 2_000
 
 /**
  * Only the BackendPort methods HTTP uses. Pick keeps their types in sync.
@@ -148,6 +155,10 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     }
   }
 
+  // Tracked so shutdown can report - and, if the grace expires, destroy - whatever is still
+  // connected. A connection nothing can close is what used to hang a shutdown forever.
+  const sockets = new Set<import("node:net").Socket>()
+
   const server = createServer((req, res) => {
     void route(req, res).catch((err) => {
       log.error("unhandled", { error: describeError(err) })
@@ -157,6 +168,11 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
         res.end(JSON.stringify({ error: status === 400 ? "bad_request" : "internal_error", message: describeError(err) }))
       }
     })
+  })
+
+  server.on("connection", (socket) => {
+    sockets.add(socket)
+    socket.on("close", () => sockets.delete(socket))
   })
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -313,10 +329,27 @@ export async function serve(config: Config, backends: BackendRoutes): Promise<Ru
     url,
     close: async () => {
       for (const transport of sessions.values()) {
-        await transport.close().catch(() => {})
+        // Bounded too: one transport that never settles must not stop the rest, or the
+        // daemon never gets as far as releasing its lock.
+        await withTimeout(transport.close().catch(() => {}), CLOSE_GRACE_MS, "transport close").catch((err) =>
+          log.warn("transport close did not settle", { error: describeError(err) }),
+        )
       }
       sessions.clear()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      // `server.close()` only stops accepting: its callback waits for every connection to
+      // end, and Bun keeps it pending forever when a connection carries an unfinished request
+      // or an open SSE response - which is what an idle MCP client holds. So stop accepting,
+      // drop the idle connections, then force-close whatever outlives the grace.
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()))
+      server.closeIdleConnections?.()
+      const force = setTimeout(() => {
+        log.warn("force-closing connections that outlived shutdown", { connections: sockets.size })
+        server.closeAllConnections?.()
+        for (const socket of sockets) socket.destroy()
+      }, CLOSE_GRACE_MS)
+      force.unref?.()
+      await closed
+      clearTimeout(force)
     },
   }
 }

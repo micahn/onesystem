@@ -6,13 +6,13 @@
 
 import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { loadConfig, probeConfig, type Config } from "./config.ts"
 import { configDir, configPath, daemonUrl, lockPath, stateDir } from "./paths.ts"
 import { registrations } from "./naming.ts"
 import type { DaemonStatus } from "./health.ts"
-import { inspect } from "./lock.ts"
+import { inspect, pidAlive } from "./lock.ts"
 import { runDaemon, probe, LOCK_BUSY_EXIT } from "./daemon.ts"
 import { describeError } from "./async.ts"
 import { pluginAutoloadFiles, repairConfig, switchToBackend, writeBackend } from "./config-edit.ts"
@@ -113,8 +113,10 @@ async function cmdStop(): Promise<number> {
   const url = daemonUrl(found.address.host, found.address.port)
   const health = await probe(url)
   if (!health) {
-    log.info("no daemon reachable", { url })
-    return 0
+    // Nothing answers /health, but the lock may still name a live process: a shutdown that
+    // hung after closing its listener leaves exactly that. Without this fallback, the one
+    // command that can clear that state is the one command that cannot run.
+    return stopFromLock(url)
   }
   const pid = typeof health.pid === "number" ? health.pid : null
   if (pid === null) {
@@ -136,8 +138,55 @@ async function cmdStop(): Promise<number> {
       return 0
     }
   }
-  log.error("daemon did not exit within 10s", { pid })
+  // Reachable but not finishing: escalate, so `stop` can always stop.
+  log.warn("daemon did not exit within 10s; sending SIGKILL", { pid })
+  return (await stopPid(pid, "SIGKILL")) ? 0 : 1
+}
+
+/**
+ * Stop a daemon that no longer answers /health, using the pid recorded in the lock file.
+ *
+ * SIGTERM first, then SIGKILL: the process that lands here is usually one already inside a
+ * shutdown that will never finish, and its handler ignores a second signal because the
+ * shutdown is already marked in progress.
+ */
+async function stopFromLock(url: string): Promise<number> {
+  const path = lockPath()
+  const holder = await inspect(path)
+  if (holder.pid === null || !holder.alive) {
+    log.info("no daemon reachable", { url, lock: path, pid: holder.pid })
+    return 0
+  }
+
+  log.warn("daemon is not answering; stopping the pid that holds the lock", { pid: holder.pid, lock: path })
+  if (await stopPid(holder.pid, "SIGTERM")) return 0
+
+  log.warn("daemon ignored SIGTERM; sending SIGKILL", { pid: holder.pid })
+  if (await stopPid(holder.pid, "SIGKILL")) return 0
+
+  log.error("daemon did not exit", { pid: holder.pid })
   return 1
+}
+
+/** Signal a pid, wait for it to go, then clear the lock if it still names that pid. */
+async function stopPid(pid: number, sig: "SIGTERM" | "SIGKILL"): Promise<boolean> {
+  try {
+    process.kill(pid, sig)
+  } catch (err) {
+    log.error("kill failed", { pid, error: describeError(err) })
+    return false
+  }
+  for (let i = 0; i < 30; i++) {
+    await Bun.sleep(100)
+    if (pidAlive(pid)) continue
+    const path = lockPath()
+    const holder = await inspect(path)
+    // Only our own record: a successor that reclaimed it already owns the file.
+    if (holder.pid === pid) await unlink(path).catch(() => {})
+    log.info("daemon exited", { pid, signal: sig })
+    return true
+  }
+  return false
 }
 
 async function cmdStatus(config: Config, resolved: string): Promise<number> {

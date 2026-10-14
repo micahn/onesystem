@@ -7,7 +7,7 @@
 import type { Config } from "./config.ts"
 import { lockPath } from "./paths.ts"
 import { logger } from "./log.ts"
-import { describeError } from "./async.ts"
+import { describeError, withTimeout } from "./async.ts"
 import { acquire, LockBusy, type Lease } from "./lock.ts"
 import { serve, type RunningDaemon } from "./http.ts"
 import { Supervisor, type SupervisorDeps } from "./supervisor.ts"
@@ -21,6 +21,13 @@ const log = logger("daemon")
  * Tell `onesystem start` that another daemon holds the lock; wait for its health.
  */
 export const LOCK_BUSY_EXIT = 3
+
+/**
+ * Bound each shutdown step. A close that never settles - an unfinished response holding the
+ * listener open - must not stop the daemon from releasing its lock, because a live process
+ * holding the lock refuses every later start (see lock.ts).
+ */
+const SHUTDOWN_STEP_TIMEOUT_MS = 10_000
 
 export interface DaemonOptions extends SupervisorDeps {
   /** Override the lock path. Tests use this to stay out of the real state dir. */
@@ -65,13 +72,21 @@ export async function runDaemon(config: Config, options: DaemonOptions = {}): Pr
     resolveFinished = r
   })
 
+  /** One shutdown step, bounded and logged. Nothing here may wait forever. */
+  const step = (work: Promise<unknown>, what: string): Promise<void> =>
+    withTimeout(work, SHUTDOWN_STEP_TIMEOUT_MS, what)
+      .then(() => undefined)
+      .catch((err) => log.error(`${what} failed`, { error: describeError(err) }))
+
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
     log.info("shutting down", { reason })
-    // Keep the lock until local backends stop. Log failures that may leave resources held.
-    await daemon?.close().catch((err) => log.error("http close failed", { error: describeError(err) }))
-    await backends.quiesce().catch((err) => log.error("backend quiesce failed", { error: describeError(err) }))
+    // Keep the lock until local backends stop. Every step is bounded, because the release
+    // below is what lets a successor start: a step that never settled would leave a live
+    // process holding the lock, and a live pid alone refuses every later start.
+    await step(daemon?.close() ?? Promise.resolve(), "http close")
+    await step(backends.quiesce(), "backend quiesce")
     await lease.release()
     log.info("stopped", { reason })
     resolveFinished()
